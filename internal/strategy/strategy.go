@@ -50,6 +50,16 @@ type Portfolio interface {
 	TotalPL() float64
 }
 
+// Trade represents a single real-time trade print from the exchange.
+type Trade struct {
+	Symbol     string
+	Timestamp  time.Time
+	Price      float64
+	Size       uint32
+	Exchange   string
+	Conditions []string
+}
+
 // Strategy is implemented by any trading algorithm.
 // The engine calls OnTick on every price update and executes any returned orders.
 // All strategy state must live inside the Strategy implementation — the engine is stateless w.r.t. strategy internals.
@@ -57,4 +67,13 @@ type Strategy interface {
 	Name() string
 	OnTick(tick Tick, portfolio Portfolio) []Order
 	OnFill(fill Fill)
+}
+
+// TradeSubscriber is an optional interface a strategy can implement to receive
+// individual trade prints instead of (or in addition to) completed bars.
+// If the strategy implements this, the paper engine will also subscribe to
+// the trade stream for the requested symbols.
+// OnTick is still called for bar events — implement it as a no-op if not needed.
+type TradeSubscriber interface {
+	OnTrade(trade Trade, portfolio Portfolio) []Order
 }

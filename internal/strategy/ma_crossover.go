@@ -128,6 +128,16 @@ func (m *MACrossover) OnTick(tick Tick, portfolio Portfolio) []Order {
 	return orders
 }
 
+// SeedPosition implements paper.PositionSeeder.
+// Called on startup if the bot restarts while holding a position,
+// so the strategy knows it's already in a trade and at what cost.
+func (m *MACrossover) SeedPosition(symbol string, qty, avgCost float64) {
+	s := m.getOrCreate(symbol)
+	s.inPosition = true
+	s.entryPrice = avgCost
+	s.qty = qty
+}
+
 func (m *MACrossover) OnFill(fill Fill) {
 	s := m.getOrCreate(fill.Symbol)
 	switch fill.Side {
