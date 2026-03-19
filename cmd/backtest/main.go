@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"brandon-bot/internal/backtest"
+	"brandon-bot/internal/db"
 	"brandon-bot/internal/market"
 	"brandon-bot/internal/strategy"
 )
@@ -67,6 +68,26 @@ func main() {
 	engine := backtest.NewEngine(strat, *capital)
 	results := engine.Run(ticks)
 	results.Print()
+
+	store, err := db.Open()
+	if err != nil {
+		log.Printf("warning: could not open database, skipping logging: %v", err)
+		return
+	}
+	defer store.Close()
+
+	runID, err := store.SaveBacktestRun(db.BacktestRunParams{
+		Strategy:  *stratName,
+		Symbols:   symbols,
+		Timeframe: *timeframeFlag,
+		From:      from,
+		To:        to,
+	}, results)
+	if err != nil {
+		log.Printf("warning: could not save run to database: %v", err)
+		return
+	}
+	fmt.Printf("\nRun saved to database (id=%d)\n", runID)
 }
 
 func resolveStrategy(name string) (strategy.Strategy, error) {

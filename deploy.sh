@@ -7,7 +7,7 @@ PLIST_LABEL="com.bennyconn.brandon-bot"
 PLIST_PATH="$HOME/Library/LaunchAgents/$PLIST_LABEL.plist"
 
 echo "==> Building brandon-bot for arm64 macOS..."
-GOOS=darwin GOARCH=arm64 go build -o brandon-bot ./cmd/api/main.go
+GOOS=darwin GOARCH=arm64 go build -o brandon-bot ./cmd/live/main.go
 
 echo "==> Syncing binary and scripts..."
 ssh "$MINI" "mkdir -p $REMOTE_DIR/scripts $REMOTE_DIR/data $REMOTE_DIR/logs"
