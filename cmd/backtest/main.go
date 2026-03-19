@@ -1,4 +1,79 @@
 package main
 
-// Backtesting engine wired up in step 3.
-func main() {}
+import (
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"time"
+
+	"brandon-bot/internal/backtest"
+	"brandon-bot/internal/market"
+	"brandon-bot/internal/strategy"
+)
+
+func main() {
+	stratName := flag.String("strategy", "ma_crossover", "strategy to run")
+	symbolsFlag := flag.String("symbols", "AAPL", "comma-separated list of symbols")
+	fromFlag := flag.String("from", "", "start date (YYYY-MM-DD)")
+	toFlag := flag.String("to", "", "end date (YYYY-MM-DD)")
+	timeframeFlag := flag.String("timeframe", "1d", "bar timeframe: 1m, 5m, 15m, 1h, 1d")
+	capital := flag.Float64("capital", 10000, "starting capital in USD")
+	flag.Parse()
+
+	if *fromFlag == "" || *toFlag == "" {
+		fmt.Fprintln(os.Stderr, "error: --from and --to are required (YYYY-MM-DD)")
+		os.Exit(1)
+	}
+
+	from, err := time.Parse("2006-01-02", *fromFlag)
+	if err != nil {
+		log.Fatalf("invalid --from date: %v", err)
+	}
+	to, err := time.Parse("2006-01-02", *toFlag)
+	if err != nil {
+		log.Fatalf("invalid --to date: %v", err)
+	}
+	// End of the to-day so we include all bars on that date.
+	to = to.Add(24*time.Hour - time.Second)
+
+	tf, err := market.ParseTimeFrame(*timeframeFlag)
+	if err != nil {
+		log.Fatalf("invalid --timeframe: %v", err)
+	}
+
+	symbols := strings.Split(*symbolsFlag, ",")
+	for i, s := range symbols {
+		symbols[i] = strings.TrimSpace(strings.ToUpper(s))
+	}
+
+	strat, err := resolveStrategy(*stratName)
+	if err != nil {
+		log.Fatalf("unknown strategy %q: %v", *stratName, err)
+	}
+
+	fmt.Printf("Fetching %s bars for %s from %s to %s...\n",
+		*timeframeFlag, strings.Join(symbols, ", "),
+		from.Format("2006-01-02"), to.Format("2006-01-02"))
+
+	client := market.NewClient()
+	ticks, err := client.FetchBarsForSymbols(symbols, from, to, tf)
+	if err != nil {
+		log.Fatalf("fetching historical data: %v", err)
+	}
+	fmt.Printf("Loaded %d bars\n", len(ticks))
+
+	engine := backtest.NewEngine(strat, *capital)
+	results := engine.Run(ticks)
+	results.Print()
+}
+
+func resolveStrategy(name string) (strategy.Strategy, error) {
+	switch name {
+	case "ma_crossover":
+		return strategy.NewMACrossover(), nil
+	default:
+		return nil, fmt.Errorf("available strategies: ma_crossover")
+	}
+}
