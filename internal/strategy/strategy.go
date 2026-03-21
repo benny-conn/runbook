@@ -60,6 +60,16 @@ type Trade struct {
 	Conditions []string
 }
 
+// Configurable is an optional interface a strategy can implement to accept
+// a JSON config file passed via --config on the CLI. Configure is called once
+// after the strategy is constructed and before the first OnTick, so it can
+// override any defaults set in the constructor.
+// Partial configs are fine — only fields present in the JSON are updated;
+// missing fields keep their constructor defaults.
+type Configurable interface {
+	Configure(data []byte) error
+}
+
 // Strategy is implemented by any trading algorithm.
 // The engine calls OnTick on every price update and executes any returned orders.
 // All strategy state must live inside the Strategy implementation — the engine is stateless w.r.t. strategy internals.

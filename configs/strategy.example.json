@@ -1,0 +1,29 @@
+{
+  "_comment": "Copy this file to five_min_orb.json and fill in the provider section you're using.",
+
+  "ibkr": {
+    "account_id": "",
+    "host": "127.0.0.1",
+    "port": 4002
+  },
+
+  "alpaca": {
+    "api_key": "",
+    "secret": "",
+    "base_url": "https://paper-api.alpaca.markets",
+    "feed": "iex"
+  },
+
+  "tradovate": {
+    "username": "",
+    "password": "",
+    "app_id": "",
+    "cid": "",
+    "sec": "",
+    "device_id": "",
+    "app_version": "1.0",
+    "demo": true
+  },
+
+  "strategy": {}
+}

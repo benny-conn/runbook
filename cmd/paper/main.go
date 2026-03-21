@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -19,13 +20,24 @@ import (
 	"brandon-bot/internal/strategy"
 )
 
+// RunConfig is the top-level structure for a JSON config file.
+// Provider sections supply credentials; the strategy section is passed
+// directly to the strategy's Configure method.
+// Any field left empty falls back to the corresponding environment variable.
+type RunConfig struct {
+	Alpaca    alpacaprovider.Config    `json:"alpaca"`
+	IBKR      ibkrprovider.Config      `json:"ibkr"`
+	Tradovate tradovateprovider.Config `json:"tradovate"`
+	Strategy  json.RawMessage          `json:"strategy"`
+}
+
 func main() {
-	stratName    := flag.String("strategy", "ma_crossover", "strategy to run")
-	symbolsFlag  := flag.String("symbols", "AAPL", "comma-separated list of symbols")
-	capitalFlag  := flag.Float64("capital", 10000, "starting capital in USD")
+	stratName     := flag.String("strategy", "ma_crossover", "strategy to run")
+	symbolsFlag   := flag.String("symbols", "AAPL", "comma-separated list of symbols")
+	capitalFlag   := flag.Float64("capital", 10000, "starting capital in USD")
 	timeframeFlag := flag.String("timeframe", "1m", "bar timeframe: 1s, 1m, 5m, 15m, 1h, 1d")
-	feedFlag     := flag.String("feed", "iex", "Alpaca feed: iex or sip (ignored for IBKR)")
-	providerFlag := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, or tradovate")
+	providerFlag  := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, or tradovate")
+	configFlag    := flag.String("config", "", "path to JSON config file (provider credentials + strategy params)")
 	flag.Parse()
 
 	symbols := strings.Split(*symbolsFlag, ",")
@@ -33,9 +45,27 @@ func main() {
 		symbols[i] = strings.TrimSpace(strings.ToUpper(s))
 	}
 
+	var runCfg RunConfig
+	if *configFlag != "" {
+		data, err := os.ReadFile(*configFlag)
+		if err != nil {
+			log.Fatalf("reading config file %q: %v", *configFlag, err)
+		}
+		if err := json.Unmarshal(data, &runCfg); err != nil {
+			log.Fatalf("parsing config file %q: %v", *configFlag, err)
+		}
+	}
+
 	strat, err := resolveStrategy(*stratName)
 	if err != nil {
 		log.Fatalf("unknown strategy %q: %v", *stratName, err)
+	}
+	if len(runCfg.Strategy) > 0 {
+		if c, ok := strat.(strategy.Configurable); ok {
+			if err := c.Configure(runCfg.Strategy); err != nil {
+				log.Fatalf("configuring strategy: %v", err)
+			}
+		}
 	}
 
 	store, err := db.Open()
@@ -49,13 +79,13 @@ func main() {
 
 	switch *providerFlag {
 	case "alpaca":
-		p := alpacaprovider.New(*feedFlag)
+		p := alpacaprovider.New(runCfg.Alpaca)
 		md, exec = p, p
 	case "ibkr":
-		p := ibkrprovider.New()
+		p := ibkrprovider.New(runCfg.IBKR)
 		md, exec = p, p
 	case "tradovate":
-		p := tradovateprovider.New()
+		p := tradovateprovider.New(runCfg.Tradovate)
 		md, exec = p, p
 	default:
 		log.Fatalf("unknown provider %q — use alpaca, ibkr, or tradovate", *providerFlag)

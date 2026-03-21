@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 )
@@ -20,36 +19,47 @@ type tokenState struct {
 }
 
 type authClient struct {
-	baseURL string
-	http    *http.Client
-	mu      sync.RWMutex
-	state   *tokenState
+	baseURL    string
+	http       *http.Client
+	mu         sync.RWMutex
+	state      *tokenState
+	creds      authCreds
 }
 
-func newAuthClient(demo bool) *authClient {
+type authCreds struct {
+	username   string
+	password   string
+	appID      string
+	appVersion string
+	deviceID   string
+	cid        string
+	sec        string
+}
+
+func newAuthClient(demo bool, creds authCreds) *authClient {
 	base := "https://live.tradovateapi.com/v1"
 	if demo {
 		base = "https://demo.tradovateapi.com/v1"
 	}
+	if creds.appVersion == "" {
+		creds.appVersion = "1.0"
+	}
 	return &authClient{
 		baseURL: base,
 		http:    &http.Client{Timeout: 15 * time.Second},
+		creds:   creds,
 	}
 }
 
 func (a *authClient) authenticate() error {
-	appVersion := os.Getenv("TRADOVATE_APP_VERSION")
-	if appVersion == "" {
-		appVersion = "1.0"
-	}
 	body, _ := json.Marshal(map[string]string{
-		"name":       os.Getenv("TRADOVATE_USERNAME"),
-		"password":   os.Getenv("TRADOVATE_PASSWORD"),
-		"appId":      os.Getenv("TRADOVATE_APP_ID"),
-		"appVersion": appVersion,
-		"deviceId":   os.Getenv("TRADOVATE_DEVICE_ID"),
-		"cid":        os.Getenv("TRADOVATE_CID"),
-		"sec":        os.Getenv("TRADOVATE_SEC"),
+		"name":       a.creds.username,
+		"password":   a.creds.password,
+		"appId":      a.creds.appID,
+		"appVersion": a.creds.appVersion,
+		"deviceId":   a.creds.deviceID,
+		"cid":        a.creds.cid,
+		"sec":        a.creds.sec,
 	})
 
 	resp, err := a.http.Post(a.baseURL+"/auth/accesstokenrequest", "application/json", bytes.NewReader(body))
@@ -105,8 +115,8 @@ func (a *authClient) renew() error {
 	defer resp.Body.Close()
 
 	var r struct {
-		AccessToken   string `json:"accessToken"`
-		MdAccessToken string `json:"mdAccessToken"`
+		AccessToken    string `json:"accessToken"`
+		MdAccessToken  string `json:"mdAccessToken"`
 		ExpirationTime string `json:"expirationTime"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {

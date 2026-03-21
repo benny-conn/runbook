@@ -18,28 +18,53 @@ import (
 	"brandon-bot/internal/strategy"
 )
 
+// Config holds Alpaca provider credentials and settings.
+type Config struct {
+	APIKey  string `json:"api_key"`
+	Secret  string `json:"secret"`
+	BaseURL string `json:"base_url"`
+	Feed    string `json:"feed"`
+}
+
 // Provider implements provider.MarketData and provider.Execution.
 type Provider struct {
 	trading *alp.Client
 	md      *marketdata.Client
 	feed    marketdata.Feed
+	apiKey  string
+	secret  string
 }
 
-// New creates an Alpaca provider.
-// feed should be "iex" (free tier) or "sip" (paid).
-func New(feed string) *Provider {
+// New creates an Alpaca provider. Config fields override env vars where set.
+func New(cfg Config) *Provider {
+	apiKey := envOr(cfg.APIKey, "ALPACA_API_KEY")
+	secret := envOr(cfg.Secret, "ALPACA_SECRET")
+	baseURL := envOr(cfg.BaseURL, "ALPACA_BASE_URL")
+	feed := envOr(cfg.Feed, "")
+	if feed == "" {
+		feed = "iex"
+	}
 	return &Provider{
 		trading: alp.NewClient(alp.ClientOpts{
-			APIKey:    os.Getenv("ALPACA_API_KEY"),
-			APISecret: os.Getenv("ALPACA_SECRET"),
-			BaseURL:   os.Getenv("ALPACA_BASE_URL"),
+			APIKey:    apiKey,
+			APISecret: secret,
+			BaseURL:   baseURL,
 		}),
 		md: marketdata.NewClient(marketdata.ClientOpts{
-			APIKey:    os.Getenv("ALPACA_API_KEY"),
-			APISecret: os.Getenv("ALPACA_SECRET"),
+			APIKey:    apiKey,
+			APISecret: secret,
 		}),
-		feed: marketdata.Feed(feed),
+		feed:   marketdata.Feed(feed),
+		apiKey: apiKey,
+		secret: secret,
 	}
+}
+
+func envOr(val, envKey string) string {
+	if val != "" {
+		return val
+	}
+	return os.Getenv(envKey)
 }
 
 // — MarketData —
@@ -102,7 +127,7 @@ func (p *Provider) FetchBarsMulti(ctx context.Context, symbols []string, timefra
 func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timeframe string, handler func(provider.Bar)) error {
 	sc := stream.NewStocksClient(
 		p.feed,
-		stream.WithCredentials(os.Getenv("ALPACA_API_KEY"), os.Getenv("ALPACA_SECRET")),
+		stream.WithCredentials(p.apiKey, p.secret),
 		stream.WithBars(func(b stream.Bar) {
 			handler(provider.Bar{
 				Symbol:    b.Symbol,
@@ -125,7 +150,7 @@ func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timefram
 func (p *Provider) SubscribeTrades(ctx context.Context, symbols []string, handler func(provider.Trade)) error {
 	sc := stream.NewStocksClient(
 		p.feed,
-		stream.WithCredentials(os.Getenv("ALPACA_API_KEY"), os.Getenv("ALPACA_SECRET")),
+		stream.WithCredentials(p.apiKey, p.secret),
 		stream.WithTrades(func(t stream.Trade) {
 			handler(provider.Trade{
 				Symbol:    t.Symbol,
