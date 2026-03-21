@@ -24,8 +24,8 @@ import (
 
 	"github.com/hadrianl/ibapi"
 
-	"brandon-bot/internal/provider"
-	"brandon-bot/internal/strategy"
+	"brandon-bot/provider"
+	"brandon-bot/strategy"
 )
 
 const (

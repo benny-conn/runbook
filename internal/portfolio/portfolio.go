@@ -3,7 +3,7 @@ package portfolio
 import (
 	"sync"
 
-	"brandon-bot/internal/strategy"
+	"brandon-bot/strategy"
 )
 
 // SimulatedPortfolio tracks cash, positions, and P&L for backtesting.

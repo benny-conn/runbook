@@ -9,20 +9,21 @@ import (
 	"strings"
 	"time"
 
-	"brandon-bot/internal/backtest"
+	"brandon-bot/backtest"
 	"brandon-bot/internal/db"
-	alpacaprovider "brandon-bot/internal/provider/alpaca"
-	"brandon-bot/internal/strategy"
+	alpacaprovider "brandon-bot/providers/alpaca"
+	"brandon-bot/strategies"
+	"brandon-bot/strategy"
 )
 
 func main() {
-	stratName    := flag.String("strategy", "ma_crossover", "strategy to run")
-	symbolsFlag  := flag.String("symbols", "AAPL", "comma-separated list of symbols")
-	fromFlag     := flag.String("from", "", "start date (YYYY-MM-DD)")
-	toFlag       := flag.String("to", "", "end date (YYYY-MM-DD)")
+	stratName     := flag.String("strategy", "ma_crossover", "strategy to run")
+	symbolsFlag   := flag.String("symbols", "AAPL", "comma-separated list of symbols")
+	fromFlag      := flag.String("from", "", "start date (YYYY-MM-DD)")
+	toFlag        := flag.String("to", "", "end date (YYYY-MM-DD)")
 	timeframeFlag := flag.String("timeframe", "1d", "bar timeframe: 1m, 5m, 15m, 1h, 1d")
-	capital      := flag.Float64("capital", 10000, "starting capital in USD")
-	feedFlag     := flag.String("feed", "iex", "Alpaca feed: iex or sip")
+	capital       := flag.Float64("capital", 10000, "starting capital in USD")
+	feedFlag      := flag.String("feed", "iex", "Alpaca feed: iex or sip")
 	flag.Parse()
 
 	if *fromFlag == "" || *toFlag == "" {
@@ -76,8 +77,8 @@ func main() {
 		}
 	}
 
-	engine := backtest.NewEngine(strat, *capital)
-	results := engine.Run(ticks)
+	eng := backtest.NewEngine(strat, *capital)
+	results := eng.Run(ticks)
 	results.Print()
 
 	store, err := db.Open()
@@ -104,11 +105,11 @@ func main() {
 func resolveStrategy(name string) (strategy.Strategy, error) {
 	switch name {
 	case "ma_crossover":
-		return strategy.NewMACrossover(), nil
+		return strategies.NewMACrossover(), nil
 	case "rsi_pullback":
-		return strategy.NewRSIPullback(), nil
+		return strategies.NewRSIPullback(), nil
 	case "five_min_orb":
-		return strategy.NewFiveMinuteORB(strategy.FiveMinuteORBConfig{}), nil
+		return strategies.NewFiveMinuteORB(strategies.FiveMinuteORBConfig{}), nil
 	default:
 		return nil, fmt.Errorf("available strategies: ma_crossover, rsi_pullback, five_min_orb")
 	}

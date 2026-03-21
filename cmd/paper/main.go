@@ -11,13 +11,14 @@ import (
 	"strings"
 	"syscall"
 
+	"brandon-bot/engine"
 	"brandon-bot/internal/db"
-	"brandon-bot/internal/paper"
-	"brandon-bot/internal/provider"
-	alpacaprovider "brandon-bot/internal/provider/alpaca"
-	ibkrprovider "brandon-bot/internal/provider/ibkr"
-	tradovateprovider "brandon-bot/internal/provider/tradovate"
-	"brandon-bot/internal/strategy"
+	"brandon-bot/provider"
+	alpacaprovider "brandon-bot/providers/alpaca"
+	ibkrprovider "brandon-bot/providers/ibkr"
+	tradovateprovider "brandon-bot/providers/tradovate"
+	"brandon-bot/strategies"
+	"brandon-bot/strategy"
 )
 
 // RunConfig is the top-level structure for a JSON config file.
@@ -91,8 +92,8 @@ func main() {
 		log.Fatalf("unknown provider %q — use alpaca, ibkr, or tradovate", *providerFlag)
 	}
 
-	cfg := paper.DefaultConfig(*capitalFlag, *timeframeFlag)
-	engine := paper.NewEngine(strat, md, exec, store, cfg)
+	cfg := engine.DefaultConfig(*capitalFlag, *timeframeFlag)
+	eng := engine.NewEngine(strat, md, exec, store, cfg)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -100,7 +101,7 @@ func main() {
 	log.Printf("starting paper trading | provider=%s strategy=%s symbols=%s timeframe=%s capital=%.2f",
 		*providerFlag, *stratName, strings.Join(symbols, ","), *timeframeFlag, *capitalFlag)
 
-	if err := engine.Run(ctx, symbols); err != nil && err != context.Canceled {
+	if err := eng.Run(ctx, symbols); err != nil && err != context.Canceled {
 		log.Fatalf("engine stopped: %v", err)
 	}
 
@@ -110,11 +111,11 @@ func main() {
 func resolveStrategy(name string) (strategy.Strategy, error) {
 	switch name {
 	case "ma_crossover":
-		return strategy.NewMACrossover(), nil
+		return strategies.NewMACrossover(), nil
 	case "rsi_pullback":
-		return strategy.NewRSIPullback(), nil
+		return strategies.NewRSIPullback(), nil
 	case "five_min_orb":
-		return strategy.NewFiveMinuteORB(strategy.FiveMinuteORBConfig{}), nil
+		return strategies.NewFiveMinuteORB(strategies.FiveMinuteORBConfig{}), nil
 	default:
 		return nil, fmt.Errorf("available strategies: ma_crossover, rsi_pullback, five_min_orb")
 	}

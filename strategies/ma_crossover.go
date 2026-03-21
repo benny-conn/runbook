@@ -1,6 +1,9 @@
-package strategy
+package strategies
 
-import "brandon-bot/internal/risk"
+import (
+	"brandon-bot/risk"
+	"brandon-bot/strategy"
+)
 
 // ema tracks an exponential moving average for a single price series.
 type ema struct {
@@ -68,7 +71,7 @@ func (m *MACrossover) getOrCreate(symbol string) *maSymbolState {
 	return s
 }
 
-func (m *MACrossover) OnTick(tick Tick, portfolio Portfolio) []Order {
+func (m *MACrossover) OnTick(tick strategy.Tick, portfolio strategy.Portfolio) []strategy.Order {
 	s := m.getOrCreate(tick.Symbol)
 
 	s.fast.update(tick.Close)
@@ -83,7 +86,7 @@ func (m *MACrossover) OnTick(tick Tick, portfolio Portfolio) []Order {
 
 	// Stop loss: exit immediately if price is 2% below entry.
 	if s.inPosition && tick.Close <= s.entryPrice*0.98 {
-		return []Order{{
+		return []strategy.Order{{
 			Symbol:    tick.Symbol,
 			Side:      "sell",
 			Qty:       s.qty,
@@ -92,7 +95,7 @@ func (m *MACrossover) OnTick(tick Tick, portfolio Portfolio) []Order {
 		}}
 	}
 
-	var orders []Order
+	var orders []strategy.Order
 
 	if s.prevReady {
 		bullCross := s.prevFast <= s.prevSlow && currFast > currSlow
@@ -102,7 +105,7 @@ func (m *MACrossover) OnTick(tick Tick, portfolio Portfolio) []Order {
 			dollars := risk.PositionSize(portfolio.Cash(), 0.10)
 			qty := risk.QtyForDollarAmount(dollars, tick.Close)
 			if qty >= 1 {
-				orders = append(orders, Order{
+				orders = append(orders, strategy.Order{
 					Symbol:    tick.Symbol,
 					Side:      "buy",
 					Qty:       qty,
@@ -111,7 +114,7 @@ func (m *MACrossover) OnTick(tick Tick, portfolio Portfolio) []Order {
 				})
 			}
 		} else if bearCross && s.inPosition {
-			orders = append(orders, Order{
+			orders = append(orders, strategy.Order{
 				Symbol:    tick.Symbol,
 				Side:      "sell",
 				Qty:       s.qty,
@@ -128,7 +131,7 @@ func (m *MACrossover) OnTick(tick Tick, portfolio Portfolio) []Order {
 	return orders
 }
 
-// SeedPosition implements paper.PositionSeeder.
+// SeedPosition implements engine.PositionSeeder.
 // Called on startup if the bot restarts while holding a position,
 // so the strategy knows it's already in a trade and at what cost.
 func (m *MACrossover) SeedPosition(symbol string, qty, avgCost float64) {
@@ -138,7 +141,7 @@ func (m *MACrossover) SeedPosition(symbol string, qty, avgCost float64) {
 	s.qty = qty
 }
 
-func (m *MACrossover) OnFill(fill Fill) {
+func (m *MACrossover) OnFill(fill strategy.Fill) {
 	s := m.getOrCreate(fill.Symbol)
 	switch fill.Side {
 	case "buy":

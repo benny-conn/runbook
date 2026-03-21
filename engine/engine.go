@@ -1,4 +1,4 @@
-package paper
+package engine
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 
 	"brandon-bot/internal/db"
 	"brandon-bot/internal/portfolio"
-	"brandon-bot/internal/provider"
-	"brandon-bot/internal/strategy"
+	"brandon-bot/provider"
+	"brandon-bot/strategy"
 )
 
 // Config holds engine configuration.

@@ -1,4 +1,4 @@
-package paper
+package engine
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"brandon-bot/internal/portfolio"
-	"brandon-bot/internal/provider"
-	"brandon-bot/internal/strategy"
+	"brandon-bot/provider"
+	"brandon-bot/strategy"
 )
 
 // PositionSeeder is an optional interface a strategy can implement to accept

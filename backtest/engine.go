@@ -5,7 +5,7 @@ import (
 	"math"
 
 	"brandon-bot/internal/portfolio"
-	"brandon-bot/internal/strategy"
+	"brandon-bot/strategy"
 )
 
 // Trade records a completed fill along with realized P&L (for sells).

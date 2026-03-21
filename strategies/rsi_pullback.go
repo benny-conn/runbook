@@ -1,9 +1,10 @@
-package strategy
+package strategies
 
 import (
 	"fmt"
 
-	"brandon-bot/internal/risk"
+	"brandon-bot/risk"
+	"brandon-bot/strategy"
 )
 
 // sma tracks a simple moving average using a circular buffer. O(1) per update.
@@ -33,13 +34,13 @@ func (s *sma) ready() bool { return s.count >= len(s.buf) }
 
 // rsi tracks a 14-period RSI using Wilder's smoothing method.
 type rsi struct {
-	period   int
-	count    int
+	period    int
+	count     int
 	prevClose float64
-	sumGain  float64 // accumulates during seed phase
-	sumLoss  float64
-	avgGain  float64
-	avgLoss  float64
+	sumGain   float64 // accumulates during seed phase
+	sumLoss   float64
+	avgGain   float64
+	avgLoss   float64
 }
 
 func newRSI(period int) *rsi { return &rsi{period: period} }
@@ -121,7 +122,7 @@ func (s *RSIPullback) getOrCreate(symbol string) *rsiSymbolState {
 	return st
 }
 
-func (s *RSIPullback) OnTick(tick Tick, portfolio Portfolio) []Order {
+func (s *RSIPullback) OnTick(tick strategy.Tick, portfolio strategy.Portfolio) []strategy.Order {
 	st := s.getOrCreate(tick.Symbol)
 
 	ma := st.ma200.update(tick.Close)
@@ -133,7 +134,7 @@ func (s *RSIPullback) OnTick(tick Tick, portfolio Portfolio) []Order {
 
 	// Stop loss: 2% below entry.
 	if st.inPosition && tick.Close <= st.entryPrice*0.98 {
-		return []Order{{
+		return []strategy.Order{{
 			Symbol:    tick.Symbol,
 			Side:      "sell",
 			Qty:       st.qty,
@@ -144,7 +145,7 @@ func (s *RSIPullback) OnTick(tick Tick, portfolio Portfolio) []Order {
 
 	// Exit: RSI overbought.
 	if st.inPosition && rsiVal >= 65 {
-		return []Order{{
+		return []strategy.Order{{
 			Symbol:    tick.Symbol,
 			Side:      "sell",
 			Qty:       st.qty,
@@ -160,7 +161,7 @@ func (s *RSIPullback) OnTick(tick Tick, portfolio Portfolio) []Order {
 		if qty < 1 {
 			return nil
 		}
-		return []Order{{
+		return []strategy.Order{{
 			Symbol:    tick.Symbol,
 			Side:      "buy",
 			Qty:       qty,
@@ -172,7 +173,7 @@ func (s *RSIPullback) OnTick(tick Tick, portfolio Portfolio) []Order {
 	return nil
 }
 
-func (s *RSIPullback) OnFill(fill Fill) {
+func (s *RSIPullback) OnFill(fill strategy.Fill) {
 	st := s.getOrCreate(fill.Symbol)
 	switch fill.Side {
 	case "buy":
@@ -186,7 +187,7 @@ func (s *RSIPullback) OnFill(fill Fill) {
 	}
 }
 
-// SeedPosition implements paper.PositionSeeder for safe restarts.
+// SeedPosition implements engine.PositionSeeder for safe restarts.
 func (s *RSIPullback) SeedPosition(symbol string, qty, avgCost float64) {
 	st := s.getOrCreate(symbol)
 	st.inPosition = true

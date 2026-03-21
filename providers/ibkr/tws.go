@@ -10,7 +10,7 @@ import (
 
 	"github.com/hadrianl/ibapi"
 
-	"brandon-bot/internal/provider"
+	"brandon-bot/provider"
 )
 
 // — internal channel types —
@@ -80,7 +80,7 @@ func newTWS(host string, port int) (*tws, error) {
 	}
 }
 
-func (t *tws) nextReqID() int64  { return t.reqSeq.Add(1) }
+func (t *tws) nextReqID() int64   { return t.reqSeq.Add(1) }
 func (t *tws) nextOrderID() int64 { return t.ordSeq.Add(1) }
 
 // — IbWrapper overrides (only the callbacks we use) —
