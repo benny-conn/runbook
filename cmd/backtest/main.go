@@ -55,7 +55,7 @@ func main() {
 		*timeframeFlag, strings.Join(symbols, ", "),
 		from.Format("2006-01-02"), to.Format("2006-01-02"))
 
-	p := alpacaprovider.New(*feedFlag)
+	p := alpacaprovider.New(alpacaprovider.Config{Feed: *feedFlag})
 	bars, err := p.FetchBarsMulti(context.Background(), symbols, *timeframeFlag, from, to)
 	if err != nil {
 		log.Fatalf("fetching historical data: %v", err)

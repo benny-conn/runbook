@@ -42,32 +42,51 @@ type Provider struct {
 	bySymbol   map[string]int64 // symbol → contractID
 }
 
-// New creates a Tradovate provider from environment variables.
-// Defaults to demo mode for safety; set TRADOVATE_DEMO=false for live.
-//
-// Required env vars:
-//
-//	TRADOVATE_USERNAME  — Tradovate login username
-//	TRADOVATE_PASSWORD  — Tradovate login password
-//	TRADOVATE_APP_ID    — app name registered in the developer portal
-//	TRADOVATE_CID       — client ID from API credentials
-//	TRADOVATE_SEC       — API secret from API credentials
-//	TRADOVATE_DEVICE_ID — stable UUID for this machine (generate once and keep it)
-//
-// Optional:
-//
-//	TRADOVATE_APP_VERSION — defaults to "1.0"
-//	TRADOVATE_DEMO        — "false" to use live; defaults to demo
-func New() *Provider {
-	demo := os.Getenv("TRADOVATE_DEMO") != "false"
+// Config holds Tradovate API credentials and settings.
+type Config struct {
+	Username   string `json:"username"`
+	Password   string `json:"password"`
+	AppID      string `json:"app_id"`
+	CID        string `json:"cid"`
+	Sec        string `json:"sec"`
+	DeviceID   string `json:"device_id"`
+	AppVersion string `json:"app_version"`
+	Demo       *bool  `json:"demo"` // pointer so false is distinguishable from unset
+}
+
+func envOr(val, envKey string) string {
+	if val != "" {
+		return val
+	}
+	return os.Getenv(envKey)
+}
+
+// New creates a Tradovate provider. Config fields override env vars where set.
+// Defaults to demo mode unless Demo is explicitly set to false.
+func New(cfg Config) *Provider {
+	demo := true
+	if cfg.Demo != nil {
+		demo = *cfg.Demo
+	} else if os.Getenv("TRADOVATE_DEMO") == "false" {
+		demo = false
+	}
 	apiWS := livAPIWS
 	mdWS := liveMDWS
 	if demo {
 		apiWS = demoAPIWS
 		mdWS = demoMDWS
 	}
+	creds := authCreds{
+		username:   envOr(cfg.Username, "TRADOVATE_USERNAME"),
+		password:   envOr(cfg.Password, "TRADOVATE_PASSWORD"),
+		appID:      envOr(cfg.AppID, "TRADOVATE_APP_ID"),
+		appVersion: envOr(cfg.AppVersion, "TRADOVATE_APP_VERSION"),
+		deviceID:   envOr(cfg.DeviceID, "TRADOVATE_DEVICE_ID"),
+		cid:        envOr(cfg.CID, "TRADOVATE_CID"),
+		sec:        envOr(cfg.Sec, "TRADOVATE_SEC"),
+	}
 	return &Provider{
-		auth:     newAuthClient(demo),
+		auth:     newAuthClient(demo, creds),
 		apiWS:    apiWS,
 		mdWS:     mdWS,
 		byID:     make(map[int64]string),
