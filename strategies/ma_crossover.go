@@ -1,8 +1,8 @@
 package strategies
 
 import (
-	"brandon-bot/risk"
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/risk"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 // ema tracks an exponential moving average for a single price series.

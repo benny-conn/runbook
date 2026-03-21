@@ -9,8 +9,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"brandon-bot/backtest"
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/backtest"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 // Store wraps the SQLite database.

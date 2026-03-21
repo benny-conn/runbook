@@ -10,7 +10,7 @@ import (
 
 	"github.com/hadrianl/ibapi"
 
-	"brandon-bot/provider"
+	"github.com/benny-conn/brandon-bot/provider"
 )
 
 // — internal channel types —

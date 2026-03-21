@@ -11,14 +11,14 @@ import (
 	"strings"
 	"syscall"
 
-	"brandon-bot/engine"
-	"brandon-bot/internal/db"
-	"brandon-bot/provider"
-	alpacaprovider "brandon-bot/providers/alpaca"
-	ibkrprovider "brandon-bot/providers/ibkr"
-	tradovateprovider "brandon-bot/providers/tradovate"
-	"brandon-bot/strategies"
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/engine"
+	"github.com/benny-conn/brandon-bot/internal/db"
+	"github.com/benny-conn/brandon-bot/provider"
+	alpacaprovider "github.com/benny-conn/brandon-bot/providers/alpaca"
+	ibkrprovider "github.com/benny-conn/brandon-bot/providers/ibkr"
+	tradovateprovider "github.com/benny-conn/brandon-bot/providers/tradovate"
+	"github.com/benny-conn/brandon-bot/strategies"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 // RunConfig is the top-level structure for a JSON config file.

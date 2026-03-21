@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"brandon-bot/provider"
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/provider"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 const (

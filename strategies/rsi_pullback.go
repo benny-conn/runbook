@@ -3,8 +3,8 @@ package strategies
 import (
 	"fmt"
 
-	"brandon-bot/risk"
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/risk"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 // sma tracks a simple moving average using a circular buffer. O(1) per update.

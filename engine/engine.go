@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"log"
 
-	"brandon-bot/internal/db"
-	"brandon-bot/internal/portfolio"
-	"brandon-bot/provider"
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/internal/db"
+	"github.com/benny-conn/brandon-bot/internal/portfolio"
+	"github.com/benny-conn/brandon-bot/provider"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 // Config holds engine configuration.

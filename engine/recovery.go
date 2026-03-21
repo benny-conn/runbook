@@ -6,9 +6,9 @@ import (
 	"log"
 	"time"
 
-	"brandon-bot/internal/portfolio"
-	"brandon-bot/provider"
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/internal/portfolio"
+	"github.com/benny-conn/brandon-bot/provider"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 // PositionSeeder is an optional interface a strategy can implement to accept

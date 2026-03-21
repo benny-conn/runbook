@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 // Bar is a completed OHLCV candlestick.
