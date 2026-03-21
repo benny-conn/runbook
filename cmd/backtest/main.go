@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -10,17 +11,18 @@ import (
 
 	"brandon-bot/internal/backtest"
 	"brandon-bot/internal/db"
-	"brandon-bot/internal/market"
+	alpacaprovider "brandon-bot/internal/provider/alpaca"
 	"brandon-bot/internal/strategy"
 )
 
 func main() {
-	stratName := flag.String("strategy", "ma_crossover", "strategy to run")
-	symbolsFlag := flag.String("symbols", "AAPL", "comma-separated list of symbols")
-	fromFlag := flag.String("from", "", "start date (YYYY-MM-DD)")
-	toFlag := flag.String("to", "", "end date (YYYY-MM-DD)")
+	stratName    := flag.String("strategy", "ma_crossover", "strategy to run")
+	symbolsFlag  := flag.String("symbols", "AAPL", "comma-separated list of symbols")
+	fromFlag     := flag.String("from", "", "start date (YYYY-MM-DD)")
+	toFlag       := flag.String("to", "", "end date (YYYY-MM-DD)")
 	timeframeFlag := flag.String("timeframe", "1d", "bar timeframe: 1m, 5m, 15m, 1h, 1d")
-	capital := flag.Float64("capital", 10000, "starting capital in USD")
+	capital      := flag.Float64("capital", 10000, "starting capital in USD")
+	feedFlag     := flag.String("feed", "iex", "Alpaca feed: iex or sip")
 	flag.Parse()
 
 	if *fromFlag == "" || *toFlag == "" {
@@ -39,11 +41,6 @@ func main() {
 	// End of the to-day so we include all bars on that date.
 	to = to.Add(24*time.Hour - time.Second)
 
-	tf, err := market.ParseTimeFrame(*timeframeFlag)
-	if err != nil {
-		log.Fatalf("invalid --timeframe: %v", err)
-	}
-
 	symbols := strings.Split(*symbolsFlag, ",")
 	for i, s := range symbols {
 		symbols[i] = strings.TrimSpace(strings.ToUpper(s))
@@ -58,12 +55,26 @@ func main() {
 		*timeframeFlag, strings.Join(symbols, ", "),
 		from.Format("2006-01-02"), to.Format("2006-01-02"))
 
-	client := market.NewClient()
-	ticks, err := client.FetchBarsForSymbols(symbols, from, to, tf, "")
+	p := alpacaprovider.New(*feedFlag)
+	bars, err := p.FetchBarsMulti(context.Background(), symbols, *timeframeFlag, from, to)
 	if err != nil {
 		log.Fatalf("fetching historical data: %v", err)
 	}
-	fmt.Printf("Loaded %d bars\n", len(ticks))
+	fmt.Printf("Loaded %d bars\n", len(bars))
+
+	// Convert provider.Bar → strategy.Tick for the backtest engine.
+	ticks := make([]strategy.Tick, len(bars))
+	for i, b := range bars {
+		ticks[i] = strategy.Tick{
+			Symbol:    b.Symbol,
+			Timestamp: b.Timestamp,
+			Open:      b.Open,
+			High:      b.High,
+			Low:       b.Low,
+			Close:     b.Close,
+			Volume:    int64(b.Volume),
+		}
+	}
 
 	engine := backtest.NewEngine(strat, *capital)
 	results := engine.Run(ticks)

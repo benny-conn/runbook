@@ -4,15 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
-
-	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
-	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata"
-	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata/stream"
 
 	"brandon-bot/internal/db"
-	"brandon-bot/internal/execution"
 	"brandon-bot/internal/portfolio"
+	"brandon-bot/internal/provider"
 	"brandon-bot/internal/strategy"
 )
 
@@ -20,15 +15,13 @@ import (
 type Config struct {
 	Capital    float64
 	Timeframe  string
-	Feed       string // "iex" (free) or "sip" (paid) — used for both live stream and warm-up fetch
-	WarmupBars int    // number of historical bars to replay on startup for indicator warm-up
+	WarmupBars int // number of historical bars to replay on startup for indicator warm-up
 }
 
-func DefaultConfig(capital float64, timeframe, feed string) Config {
+func DefaultConfig(capital float64, timeframe string) Config {
 	return Config{
 		Capital:    capital,
 		Timeframe:  timeframe,
-		Feed:       feed,
 		WarmupBars: 100,
 	}
 }
@@ -46,23 +39,28 @@ func (tickEvent) isEvent()  {}
 func (tradeEvent) isEvent() {}
 func (fillEvent) isEvent()  {}
 
-// Engine is the paper trading engine. It streams live data from Alpaca,
+// Engine is the paper trading engine. It streams live data from the provider,
 // calls the strategy on each event, submits returned orders, and processes
 // async fill events — all serialized through a single event loop.
 type Engine struct {
 	strategy  strategy.Strategy
 	portfolio *portfolio.SimulatedPortfolio
-	executor  *execution.PaperExecutor
+	md        provider.MarketData
+	exec      provider.Execution
 	store     *db.Store
 	config    Config
 	eventCh   chan engineEvent
+	ctx       context.Context // set in Run, used by submitOrders
 }
 
-func NewEngine(strat strategy.Strategy, exec *execution.PaperExecutor, store *db.Store, cfg Config) *Engine {
+// NewEngine constructs a paper trading engine. md and exec may be the same
+// object (e.g. *alpaca.Provider) or separate implementations.
+func NewEngine(strat strategy.Strategy, md provider.MarketData, exec provider.Execution, store *db.Store, cfg Config) *Engine {
 	return &Engine{
 		strategy:  strat,
 		portfolio: portfolio.NewSimulatedPortfolio(cfg.Capital),
-		executor:  exec,
+		md:        md,
+		exec:      exec,
 		store:     store,
 		config:    cfg,
 		eventCh:   make(chan engineEvent, 512),
@@ -70,84 +68,59 @@ func NewEngine(strat strategy.Strategy, exec *execution.PaperExecutor, store *db
 }
 
 // Run starts the paper trading engine. It blocks until ctx is cancelled.
-// feed should be "iex" (free) or "sip" (paid).
-func (e *Engine) Run(ctx context.Context, symbols []string, feed string) error {
-	// Seed portfolio and warm up strategy indicators from Alpaca state + recent history.
-	if err := e.recover(symbols); err != nil {
+func (e *Engine) Run(ctx context.Context, symbols []string) error {
+	e.ctx = ctx
+
+	// Seed portfolio and warm up strategy indicators from account state + recent history.
+	if err := e.recover(ctx, symbols); err != nil {
 		return fmt.Errorf("startup recovery: %w", err)
 	}
 
-	// Trade updates (fills) come in async — route through event channel so all
-	// strategy calls remain on the processLoop goroutine.
-	e.executor.Client.StreamTradeUpdatesInBackground(ctx, func(update alpaca.TradeUpdate) {
-		if update.Event != "fill" && update.Event != "partial_fill" {
-			return
-		}
-		if update.Price == nil || update.Qty == nil {
-			return
-		}
-		f := strategy.Fill{
-			Symbol:    update.Order.Symbol,
-			Side:      string(update.Order.Side),
-			Qty:       update.Qty.InexactFloat64(),
-			Price:     update.Price.InexactFloat64(),
-			Timestamp: update.At,
-		}
-		select {
-		case e.eventCh <- fillEvent{fill: f}:
-		case <-ctx.Done():
-		}
-	})
-
-	// Build stream options. WithBars/WithTrades must be passed at construction time —
-	// SubscribeToBars/SubscribeToTrades are only for dynamic changes after Connect.
-	opts := []stream.StockOption{
-		stream.WithCredentials(os.Getenv("ALPACA_API_KEY"), os.Getenv("ALPACA_SECRET")),
-		stream.WithBars(func(bar stream.Bar) {
-			e.send(ctx, tickEvent{tick: strategy.Tick{
-				Symbol:    bar.Symbol,
-				Timestamp: bar.Timestamp,
-				Open:      bar.Open,
-				High:      bar.High,
-				Low:       bar.Low,
-				Close:     bar.Close,
-				Volume:    int64(bar.Volume),
+	// Fill events come in async — route through event channel so all strategy
+	// calls remain on the processLoop goroutine.
+	go func() {
+		if err := e.exec.SubscribeFills(ctx, func(f provider.Fill) {
+			e.send(ctx, fillEvent{fill: strategy.Fill{
+				Symbol:    f.Symbol,
+				Side:      f.Side,
+				Qty:       f.Qty,
+				Price:     f.Price,
+				Timestamp: f.Timestamp,
 			}})
-		}, symbols...),
-	}
+		}); err != nil && ctx.Err() == nil {
+			log.Printf("paper engine: fill subscription error: %v", err)
+		}
+	}()
 
-	// If the strategy implements TradeSubscriber, also subscribe to individual trades.
+	// If the strategy implements TradeSubscriber, subscribe to individual trades.
 	if _, ok := e.strategy.(strategy.TradeSubscriber); ok {
-		opts = append(opts, stream.WithTrades(func(t stream.Trade) {
-			e.send(ctx, tradeEvent{trade: strategy.Trade{
-				Symbol:     t.Symbol,
-				Timestamp:  t.Timestamp,
-				Price:      t.Price,
-				Size:       t.Size,
-				Exchange:   t.Exchange,
-				Conditions: t.Conditions,
-			}})
-		}, symbols...))
+		go func() {
+			if err := e.md.SubscribeTrades(ctx, symbols, func(t provider.Trade) {
+				e.send(ctx, tradeEvent{trade: strategy.Trade{
+					Symbol:    t.Symbol,
+					Timestamp: t.Timestamp,
+					Price:     t.Price,
+					Size:      uint32(t.Size),
+				}})
+			}); err != nil && ctx.Err() == nil {
+				log.Printf("paper engine: trade subscription error: %v", err)
+			}
+		}()
 		log.Printf("paper engine: trade-level subscription active for %v", symbols)
 	}
 
-	sc := stream.NewStocksClient(marketdata.Feed(feed), opts...)
-
 	go e.processLoop(ctx)
 
-	if err := sc.Connect(ctx); err != nil {
-		return fmt.Errorf("connecting to stream: %w", err)
-	}
-	log.Printf("paper engine: connected, watching %v on feed=%s", symbols, feed)
+	log.Printf("paper engine: connecting to bar stream | symbols=%v timeframe=%s", symbols, e.config.Timeframe)
 
-	// Connect() returns once the initial handshake succeeds; the SDK's reconnect
-	// loop runs in the background. Block here until the context is cancelled (Ctrl+C).
-	<-ctx.Done()
-	return nil
+	// SubscribeBars blocks until ctx is cancelled — this is the main run loop.
+	return e.md.SubscribeBars(ctx, symbols, e.config.Timeframe, func(b provider.Bar) {
+		e.send(ctx, tickEvent{tick: provider.BarToTick(b)})
+	})
 }
 
-// send routes an event to the processing loop, dropping it with a warning if the
-// channel is full (avoids blocking the WebSocket callback goroutine).
+// send routes an event to the processing loop, dropping it with a warning if
+// the channel is full (avoids blocking the WebSocket callback goroutine).
 func (e *Engine) send(ctx context.Context, ev engineEvent) {
 	select {
 	case e.eventCh <- ev:
@@ -202,15 +175,15 @@ func (e *Engine) onFill(fill strategy.Fill) {
 
 func (e *Engine) submitOrders(orders []strategy.Order) {
 	for _, order := range orders {
-		placed, err := e.executor.PlaceOrder(order)
+		result, err := e.exec.PlaceOrder(e.ctx, order)
 		if err != nil {
 			log.Printf("order error: %v", err)
 			continue
 		}
-		log.Printf("order placed: %s %s qty=%.2f reason=%q alpacaID=%s",
-			order.Side, order.Symbol, order.Qty, order.Reason, placed.ID)
+		log.Printf("order placed: %s %s qty=%.2f reason=%q id=%s",
+			order.Side, order.Symbol, order.Qty, order.Reason, result.ID)
 
-		if err := e.store.LogPaperOrder(order, placed.ID); err != nil {
+		if err := e.store.LogPaperOrder(order, result.ID); err != nil {
 			log.Printf("db: could not log order: %v", err)
 		}
 	}
