@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math"
 
-	"brandon-bot/internal/portfolio"
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/internal/portfolio"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 // Trade records a completed fill along with realized P&L (for sells).

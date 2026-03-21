@@ -1,4 +1,4 @@
-module brandon-bot
+module github.com/benny-conn/brandon-bot
 
 go 1.25.0
 

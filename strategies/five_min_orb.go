@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 // orbPhase is the daily state machine for FiveMinuteORB.

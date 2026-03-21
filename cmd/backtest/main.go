@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"brandon-bot/backtest"
-	"brandon-bot/internal/db"
-	alpacaprovider "brandon-bot/providers/alpaca"
-	"brandon-bot/strategies"
-	"brandon-bot/strategy"
+	"github.com/benny-conn/brandon-bot/backtest"
+	"github.com/benny-conn/brandon-bot/internal/db"
+	alpacaprovider "github.com/benny-conn/brandon-bot/providers/alpaca"
+	"github.com/benny-conn/brandon-bot/strategies"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 func main() {
