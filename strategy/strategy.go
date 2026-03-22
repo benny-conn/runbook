@@ -108,3 +108,37 @@ type Quote struct {
 type QuoteSubscriber interface {
 	OnQuote(quote Quote, portfolio Portfolio) []Order
 }
+
+// InitContext holds the context passed to a strategy's OnInit hook.
+type InitContext struct {
+	Symbols   []string
+	Timeframe string
+	Config    []byte // raw JSON config (nil if none)
+}
+
+// Initializer is an optional interface a strategy can implement to run setup
+// logic once before any market data arrives. Use it to fetch news, run AI
+// analysis, build watchlists, or load historical data. No per-tick overhead
+// and since it runs before the data stream starts, the timeout constraints
+// are relaxed (you could give it a longer timeout).
+type Initializer interface {
+	OnInit(ctx InitContext) error
+}
+
+// DailySessionHandler is an optional interface a strategy can implement to
+// receive callbacks at market open and/or close each day.
+// OnMarketOpen fires once at market open — useful for gap analysis,
+// pre-market movers, setting daily levels. Can return orders.
+// OnMarketClose fires once at market close — useful for EOD cleanup,
+// flattening positions, logging daily P&L, preparing for the next day.
+type DailySessionHandler interface {
+	OnMarketOpen(portfolio Portfolio) []Order
+	OnMarketClose(portfolio Portfolio) []Order
+}
+
+// Shutdowner is an optional interface a strategy can implement to run
+// cleanup logic when the strategy is stopped (e.g. final logging,
+// releasing resources).
+type Shutdowner interface {
+	OnExit()
+}

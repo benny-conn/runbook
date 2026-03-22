@@ -113,6 +113,19 @@ type Execution interface {
 	SubscribeFills(ctx context.Context, handler func(Fill)) error
 }
 
+// SessionEvent describes a market session transition.
+type SessionEvent struct {
+	Type string // "market_open" or "market_close"
+	Time time.Time
+}
+
+// SessionNotifier is an optional interface a provider can implement to emit
+// market-open and market-close events. If the provider supports it, the engine
+// subscribes so it can call the strategy's DailySessionHandler hooks.
+type SessionNotifier interface {
+	SubscribeSession(ctx context.Context, handler func(SessionEvent)) error
+}
+
 // BarToTick converts a provider Bar to a strategy Tick.
 func BarToTick(b Bar) strategy.Tick {
 	return strategy.Tick{
