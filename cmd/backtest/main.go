@@ -11,7 +11,9 @@ import (
 
 	"github.com/benny-conn/brandon-bot/backtest"
 	"github.com/benny-conn/brandon-bot/internal/db"
+	"github.com/benny-conn/brandon-bot/provider"
 	alpacaprovider "github.com/benny-conn/brandon-bot/providers/alpaca"
+	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
 	"github.com/benny-conn/brandon-bot/strategies"
 	"github.com/benny-conn/brandon-bot/strategy"
 )
@@ -23,7 +25,8 @@ func main() {
 	toFlag        := flag.String("to", "", "end date (YYYY-MM-DD)")
 	timeframeFlag := flag.String("timeframe", "1d", "bar timeframe: 1m, 5m, 15m, 1h, 1d")
 	capital       := flag.Float64("capital", 10000, "starting capital in USD")
-	feedFlag      := flag.String("feed", "iex", "Alpaca feed: iex or sip")
+	feedFlag         := flag.String("feed", "iex", "Alpaca feed: iex or sip")
+	dataProviderFlag := flag.String("data-provider", "alpaca", "market data provider: alpaca or massive")
 	flag.Parse()
 
 	if *fromFlag == "" || *toFlag == "" {
@@ -52,12 +55,20 @@ func main() {
 		log.Fatalf("unknown strategy %q: %v", *stratName, err)
 	}
 
-	fmt.Printf("Fetching %s bars for %s from %s to %s...\n",
+	fmt.Printf("Fetching %s bars for %s from %s to %s (provider=%s)...\n",
 		*timeframeFlag, strings.Join(symbols, ", "),
-		from.Format("2006-01-02"), to.Format("2006-01-02"))
+		from.Format("2006-01-02"), to.Format("2006-01-02"), *dataProviderFlag)
 
-	p := alpacaprovider.New(alpacaprovider.Config{Feed: *feedFlag})
-	bars, err := p.FetchBarsMulti(context.Background(), symbols, *timeframeFlag, from, to)
+	var md provider.MarketData
+	switch *dataProviderFlag {
+	case "alpaca":
+		md = alpacaprovider.New(alpacaprovider.Config{Feed: *feedFlag})
+	case "massive":
+		md = massiveprovider.New(massiveprovider.Config{})
+	default:
+		log.Fatalf("unknown data provider %q — use alpaca or massive", *dataProviderFlag)
+	}
+	bars, err := md.FetchBarsMulti(context.Background(), symbols, *timeframeFlag, from, to)
 	if err != nil {
 		log.Fatalf("fetching historical data: %v", err)
 	}

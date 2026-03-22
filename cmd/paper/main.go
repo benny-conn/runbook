@@ -16,6 +16,7 @@ import (
 	"github.com/benny-conn/brandon-bot/provider"
 	alpacaprovider "github.com/benny-conn/brandon-bot/providers/alpaca"
 	ibkrprovider "github.com/benny-conn/brandon-bot/providers/ibkr"
+	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
 	tradovateprovider "github.com/benny-conn/brandon-bot/providers/tradovate"
 	"github.com/benny-conn/brandon-bot/strategies"
 	"github.com/benny-conn/brandon-bot/strategy"
@@ -29,6 +30,7 @@ type RunConfig struct {
 	Alpaca    alpacaprovider.Config    `json:"alpaca"`
 	IBKR      ibkrprovider.Config      `json:"ibkr"`
 	Tradovate tradovateprovider.Config `json:"tradovate"`
+	Massive   massiveprovider.Config   `json:"massive"`
 	Strategy  json.RawMessage          `json:"strategy"`
 }
 
@@ -37,8 +39,10 @@ func main() {
 	symbolsFlag   := flag.String("symbols", "AAPL", "comma-separated list of symbols")
 	capitalFlag   := flag.Float64("capital", 10000, "starting capital in USD")
 	timeframeFlag := flag.String("timeframe", "1m", "bar timeframe: 1s, 1m, 5m, 15m, 1h, 1d")
-	providerFlag  := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, or tradovate")
-	configFlag    := flag.String("config", "", "path to JSON config file (provider credentials + strategy params)")
+	providerFlag     := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, or tradovate")
+	dataProviderFlag := flag.String("data-provider", "", "market data provider override: massive, alpaca, ibkr, tradovate")
+	execProviderFlag := flag.String("exec-provider", "", "execution provider override: alpaca, ibkr, tradovate")
+	configFlag       := flag.String("config", "", "path to JSON config file (provider credentials + strategy params)")
 	flag.Parse()
 
 	symbols := strings.Split(*symbolsFlag, ",")
@@ -78,18 +82,27 @@ func main() {
 	var md provider.MarketData
 	var exec provider.Execution
 
-	switch *providerFlag {
-	case "alpaca":
-		p := alpacaprovider.New(runCfg.Alpaca)
-		md, exec = p, p
-	case "ibkr":
-		p := ibkrprovider.New(runCfg.IBKR)
-		md, exec = p, p
-	case "tradovate":
-		p := tradovateprovider.New(runCfg.Tradovate)
-		md, exec = p, p
-	default:
-		log.Fatalf("unknown provider %q — use alpaca, ibkr, or tradovate", *providerFlag)
+	// Split provider mode: --data-provider + --exec-provider override --provider.
+	if *dataProviderFlag != "" || *execProviderFlag != "" {
+		if *dataProviderFlag == "" || *execProviderFlag == "" {
+			log.Fatal("--data-provider and --exec-provider must both be specified")
+		}
+		md = resolveMarketData(*dataProviderFlag, &runCfg)
+		exec = resolveExecution(*execProviderFlag, &runCfg)
+	} else {
+		switch *providerFlag {
+		case "alpaca":
+			p := alpacaprovider.New(runCfg.Alpaca)
+			md, exec = p, p
+		case "ibkr":
+			p := ibkrprovider.New(runCfg.IBKR)
+			md, exec = p, p
+		case "tradovate":
+			p := tradovateprovider.New(runCfg.Tradovate)
+			md, exec = p, p
+		default:
+			log.Fatalf("unknown provider %q — use alpaca, ibkr, or tradovate", *providerFlag)
+		}
 	}
 
 	cfg := engine.DefaultConfig(*capitalFlag, *timeframeFlag)
@@ -98,14 +111,48 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
+	providerLabel := *providerFlag
+	if *dataProviderFlag != "" {
+		providerLabel = fmt.Sprintf("data=%s exec=%s", *dataProviderFlag, *execProviderFlag)
+	}
 	log.Printf("starting paper trading | provider=%s strategy=%s symbols=%s timeframe=%s capital=%.2f",
-		*providerFlag, *stratName, strings.Join(symbols, ","), *timeframeFlag, *capitalFlag)
+		providerLabel, *stratName, strings.Join(symbols, ","), *timeframeFlag, *capitalFlag)
 
 	if err := eng.Run(ctx, symbols); err != nil && err != context.Canceled {
 		log.Fatalf("engine stopped: %v", err)
 	}
 
 	fmt.Println("shutdown complete")
+}
+
+func resolveMarketData(name string, cfg *RunConfig) provider.MarketData {
+	switch name {
+	case "alpaca":
+		return alpacaprovider.New(cfg.Alpaca)
+	case "ibkr":
+		return ibkrprovider.New(cfg.IBKR)
+	case "tradovate":
+		return tradovateprovider.New(cfg.Tradovate)
+	case "massive":
+		return massiveprovider.New(cfg.Massive)
+	default:
+		log.Fatalf("unknown data provider %q — use massive, alpaca, ibkr, or tradovate", name)
+		return nil
+	}
+}
+
+func resolveExecution(name string, cfg *RunConfig) provider.Execution {
+	switch name {
+	case "alpaca":
+		return alpacaprovider.New(cfg.Alpaca)
+	case "ibkr":
+		return ibkrprovider.New(cfg.IBKR)
+	case "tradovate":
+		return tradovateprovider.New(cfg.Tradovate)
+	default:
+		log.Fatalf("unknown exec provider %q — use alpaca, ibkr, or tradovate", name)
+		return nil
+	}
 }
 
 func resolveStrategy(name string) (strategy.Strategy, error) {
