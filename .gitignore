@@ -16,6 +16,7 @@ Service.plist
 references/
 
 internal/strategy/five_min_orb.go
+scripts/five_min_orb.js
 
 configs/*.json
 !configs/strategy.example.json

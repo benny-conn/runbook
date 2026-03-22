@@ -15,19 +15,21 @@ import (
 	alpacaprovider "github.com/benny-conn/brandon-bot/providers/alpaca"
 	coinbaseprovider "github.com/benny-conn/brandon-bot/providers/coinbase"
 	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
+	topstepxprovider "github.com/benny-conn/brandon-bot/providers/topstepx"
 	"github.com/benny-conn/brandon-bot/strategies"
 	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 func main() {
-	stratName     := flag.String("strategy", "ma_crossover", "strategy to run")
-	symbolsFlag   := flag.String("symbols", "AAPL", "comma-separated list of symbols")
-	fromFlag      := flag.String("from", "", "start date (YYYY-MM-DD)")
-	toFlag        := flag.String("to", "", "end date (YYYY-MM-DD)")
+	stratName := flag.String("strategy", "ma_crossover", "strategy to run")
+	symbolsFlag := flag.String("symbols", "AAPL", "comma-separated list of symbols")
+	fromFlag := flag.String("from", "", "start date (YYYY-MM-DD)")
+	toFlag := flag.String("to", "", "end date (YYYY-MM-DD)")
 	timeframeFlag := flag.String("timeframe", "1d", "bar timeframe: 1m, 5m, 15m, 1h, 1d")
-	capital       := flag.Float64("capital", 10000, "starting capital in USD")
-	feedFlag         := flag.String("feed", "iex", "Alpaca feed: iex or sip")
+	capital := flag.Float64("capital", 10000, "starting capital in USD")
+	feedFlag := flag.String("feed", "iex", "Alpaca feed: iex or sip")
 	dataProviderFlag := flag.String("data-provider", "alpaca", "market data provider: alpaca, massive, or coinbase")
+	configFlag := flag.String("config", "", "path to JSON config file for the strategy")
 	flag.Parse()
 
 	if *fromFlag == "" || *toFlag == "" {
@@ -56,6 +58,21 @@ func main() {
 		log.Fatalf("unknown strategy %q: %v", *stratName, err)
 	}
 
+	if *configFlag != "" {
+		cs, ok := strat.(strategy.Configurable)
+		if !ok {
+			log.Fatalf("strategy %q does not support --config (does not implement Configurable)", *stratName)
+		}
+		data, err := os.ReadFile(*configFlag)
+		if err != nil {
+			log.Fatalf("reading config file: %v", err)
+		}
+		if err := cs.Configure(data); err != nil {
+			log.Fatalf("configuring strategy: %v", err)
+		}
+		fmt.Printf("Loaded config from %s\n", *configFlag)
+	}
+
 	fmt.Printf("Fetching %s bars for %s from %s to %s (provider=%s)...\n",
 		*timeframeFlag, strings.Join(symbols, ", "),
 		from.Format("2006-01-02"), to.Format("2006-01-02"), *dataProviderFlag)
@@ -66,10 +83,12 @@ func main() {
 		md = alpacaprovider.New(alpacaprovider.Config{Feed: *feedFlag})
 	case "massive":
 		md = massiveprovider.New(massiveprovider.Config{})
+	case "topstepx":
+		md = topstepxprovider.New(topstepxprovider.Config{})
 	case "coinbase":
 		md = coinbaseprovider.New(coinbaseprovider.Config{})
 	default:
-		log.Fatalf("unknown data provider %q — use alpaca, massive, or coinbase", *dataProviderFlag)
+		log.Fatalf("unknown data provider %q — use alpaca, massive, topstepx, or coinbase", *dataProviderFlag)
 	}
 	bars, err := md.FetchBarsMulti(context.Background(), symbols, *timeframeFlag, from, to)
 	if err != nil {
@@ -122,8 +141,6 @@ func resolveStrategy(name string) (strategy.Strategy, error) {
 		return strategies.NewMACrossover(), nil
 	case "rsi_pullback":
 		return strategies.NewRSIPullback(), nil
-	case "five_min_orb":
-		return strategies.NewFiveMinuteORB(strategies.FiveMinuteORBConfig{}), nil
 	default:
 		return nil, fmt.Errorf("available strategies: ma_crossover, rsi_pullback, five_min_orb")
 	}

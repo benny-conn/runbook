@@ -15,9 +15,10 @@ import (
 	"github.com/benny-conn/brandon-bot/internal/db"
 	"github.com/benny-conn/brandon-bot/provider"
 	alpacaprovider "github.com/benny-conn/brandon-bot/providers/alpaca"
-	ibkrprovider "github.com/benny-conn/brandon-bot/providers/ibkr"
 	coinbaseprovider "github.com/benny-conn/brandon-bot/providers/coinbase"
+	ibkrprovider "github.com/benny-conn/brandon-bot/providers/ibkr"
 	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
+	topstepxprovider "github.com/benny-conn/brandon-bot/providers/topstepx"
 	tradovateprovider "github.com/benny-conn/brandon-bot/providers/tradovate"
 	"github.com/benny-conn/brandon-bot/strategies"
 	"github.com/benny-conn/brandon-bot/strategy"
@@ -31,20 +32,21 @@ type RunConfig struct {
 	Alpaca    alpacaprovider.Config    `json:"alpaca"`
 	IBKR      ibkrprovider.Config      `json:"ibkr"`
 	Tradovate tradovateprovider.Config `json:"tradovate"`
+	TopstepX  topstepxprovider.Config  `json:"topstepx"`
 	Massive   massiveprovider.Config   `json:"massive"`
 	Coinbase  coinbaseprovider.Config  `json:"coinbase"`
 	Strategy  json.RawMessage          `json:"strategy"`
 }
 
 func main() {
-	stratName     := flag.String("strategy", "ma_crossover", "strategy to run")
-	symbolsFlag   := flag.String("symbols", "AAPL", "comma-separated list of symbols")
-	capitalFlag   := flag.Float64("capital", 10000, "starting capital in USD")
+	stratName := flag.String("strategy", "ma_crossover", "strategy to run")
+	symbolsFlag := flag.String("symbols", "AAPL", "comma-separated list of symbols")
+	capitalFlag := flag.Float64("capital", 10000, "starting capital in USD")
 	timeframeFlag := flag.String("timeframe", "1m", "bar timeframe: 1s, 1m, 5m, 15m, 1h, 1d")
-	providerFlag     := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, tradovate, or coinbase")
+	providerFlag := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, tradovate, topstepx, or coinbase")
 	dataProviderFlag := flag.String("data-provider", "", "market data provider override: massive, alpaca, ibkr, tradovate, coinbase")
 	execProviderFlag := flag.String("exec-provider", "", "execution provider override: alpaca, ibkr, tradovate, coinbase")
-	configFlag       := flag.String("config", "", "path to JSON config file (provider credentials + strategy params)")
+	configFlag := flag.String("config", "", "path to JSON config file (provider credentials + strategy params)")
 	flag.Parse()
 
 	symbols := strings.Split(*symbolsFlag, ",")
@@ -102,11 +104,14 @@ func main() {
 		case "tradovate":
 			p := tradovateprovider.New(runCfg.Tradovate)
 			md, exec = p, p
+		case "topstepx":
+			p := topstepxprovider.New(runCfg.TopstepX)
+			md, exec = p, p
 		case "coinbase":
 			p := coinbaseprovider.New(runCfg.Coinbase)
 			md, exec = p, p
 		default:
-			log.Fatalf("unknown provider %q — use alpaca, ibkr, tradovate, or coinbase", *providerFlag)
+			log.Fatalf("unknown provider %q — use alpaca, ibkr, tradovate, topstepx, or coinbase", *providerFlag)
 		}
 	}
 
@@ -138,12 +143,14 @@ func resolveMarketData(name string, cfg *RunConfig) provider.MarketData {
 		return ibkrprovider.New(cfg.IBKR)
 	case "tradovate":
 		return tradovateprovider.New(cfg.Tradovate)
+	case "topstepx":
+		return topstepxprovider.New(cfg.TopstepX)
 	case "massive":
 		return massiveprovider.New(cfg.Massive)
 	case "coinbase":
 		return coinbaseprovider.New(cfg.Coinbase)
 	default:
-		log.Fatalf("unknown data provider %q — use massive, alpaca, ibkr, tradovate, or coinbase", name)
+		log.Fatalf("unknown data provider %q — use massive, alpaca, ibkr, tradovate, topstepx, or coinbase", name)
 		return nil
 	}
 }
@@ -156,10 +163,12 @@ func resolveExecution(name string, cfg *RunConfig) provider.Execution {
 		return ibkrprovider.New(cfg.IBKR)
 	case "tradovate":
 		return tradovateprovider.New(cfg.Tradovate)
+	case "topstepx":
+		return topstepxprovider.New(cfg.TopstepX)
 	case "coinbase":
 		return coinbaseprovider.New(cfg.Coinbase)
 	default:
-		log.Fatalf("unknown exec provider %q — use alpaca, ibkr, tradovate, or coinbase", name)
+		log.Fatalf("unknown exec provider %q — use alpaca, ibkr, tradovate, topstepx, or coinbase", name)
 		return nil
 	}
 }
@@ -170,8 +179,6 @@ func resolveStrategy(name string) (strategy.Strategy, error) {
 		return strategies.NewMACrossover(), nil
 	case "rsi_pullback":
 		return strategies.NewRSIPullback(), nil
-	case "five_min_orb":
-		return strategies.NewFiveMinuteORB(strategies.FiveMinuteORBConfig{}), nil
 	default:
 		return nil, fmt.Errorf("available strategies: ma_crossover, rsi_pullback, five_min_orb")
 	}
