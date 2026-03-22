@@ -16,6 +16,7 @@ import (
 	"github.com/benny-conn/brandon-bot/provider"
 	alpacaprovider "github.com/benny-conn/brandon-bot/providers/alpaca"
 	ibkrprovider "github.com/benny-conn/brandon-bot/providers/ibkr"
+	coinbaseprovider "github.com/benny-conn/brandon-bot/providers/coinbase"
 	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
 	tradovateprovider "github.com/benny-conn/brandon-bot/providers/tradovate"
 	"github.com/benny-conn/brandon-bot/strategies"
@@ -31,6 +32,7 @@ type RunConfig struct {
 	IBKR      ibkrprovider.Config      `json:"ibkr"`
 	Tradovate tradovateprovider.Config `json:"tradovate"`
 	Massive   massiveprovider.Config   `json:"massive"`
+	Coinbase  coinbaseprovider.Config  `json:"coinbase"`
 	Strategy  json.RawMessage          `json:"strategy"`
 }
 
@@ -39,9 +41,9 @@ func main() {
 	symbolsFlag   := flag.String("symbols", "AAPL", "comma-separated list of symbols")
 	capitalFlag   := flag.Float64("capital", 10000, "starting capital in USD")
 	timeframeFlag := flag.String("timeframe", "1m", "bar timeframe: 1s, 1m, 5m, 15m, 1h, 1d")
-	providerFlag     := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, or tradovate")
-	dataProviderFlag := flag.String("data-provider", "", "market data provider override: massive, alpaca, ibkr, tradovate")
-	execProviderFlag := flag.String("exec-provider", "", "execution provider override: alpaca, ibkr, tradovate")
+	providerFlag     := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, tradovate, or coinbase")
+	dataProviderFlag := flag.String("data-provider", "", "market data provider override: massive, alpaca, ibkr, tradovate, coinbase")
+	execProviderFlag := flag.String("exec-provider", "", "execution provider override: alpaca, ibkr, tradovate, coinbase")
 	configFlag       := flag.String("config", "", "path to JSON config file (provider credentials + strategy params)")
 	flag.Parse()
 
@@ -100,8 +102,11 @@ func main() {
 		case "tradovate":
 			p := tradovateprovider.New(runCfg.Tradovate)
 			md, exec = p, p
+		case "coinbase":
+			p := coinbaseprovider.New(runCfg.Coinbase)
+			md, exec = p, p
 		default:
-			log.Fatalf("unknown provider %q — use alpaca, ibkr, or tradovate", *providerFlag)
+			log.Fatalf("unknown provider %q — use alpaca, ibkr, tradovate, or coinbase", *providerFlag)
 		}
 	}
 
@@ -135,8 +140,10 @@ func resolveMarketData(name string, cfg *RunConfig) provider.MarketData {
 		return tradovateprovider.New(cfg.Tradovate)
 	case "massive":
 		return massiveprovider.New(cfg.Massive)
+	case "coinbase":
+		return coinbaseprovider.New(cfg.Coinbase)
 	default:
-		log.Fatalf("unknown data provider %q — use massive, alpaca, ibkr, or tradovate", name)
+		log.Fatalf("unknown data provider %q — use massive, alpaca, ibkr, tradovate, or coinbase", name)
 		return nil
 	}
 }
@@ -149,8 +156,10 @@ func resolveExecution(name string, cfg *RunConfig) provider.Execution {
 		return ibkrprovider.New(cfg.IBKR)
 	case "tradovate":
 		return tradovateprovider.New(cfg.Tradovate)
+	case "coinbase":
+		return coinbaseprovider.New(cfg.Coinbase)
 	default:
-		log.Fatalf("unknown exec provider %q — use alpaca, ibkr, or tradovate", name)
+		log.Fatalf("unknown exec provider %q — use alpaca, ibkr, tradovate, or coinbase", name)
 		return nil
 	}
 }

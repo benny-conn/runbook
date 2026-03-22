@@ -13,6 +13,7 @@ import (
 	"github.com/benny-conn/brandon-bot/internal/db"
 	"github.com/benny-conn/brandon-bot/provider"
 	alpacaprovider "github.com/benny-conn/brandon-bot/providers/alpaca"
+	coinbaseprovider "github.com/benny-conn/brandon-bot/providers/coinbase"
 	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
 	"github.com/benny-conn/brandon-bot/strategies"
 	"github.com/benny-conn/brandon-bot/strategy"
@@ -26,7 +27,7 @@ func main() {
 	timeframeFlag := flag.String("timeframe", "1d", "bar timeframe: 1m, 5m, 15m, 1h, 1d")
 	capital       := flag.Float64("capital", 10000, "starting capital in USD")
 	feedFlag         := flag.String("feed", "iex", "Alpaca feed: iex or sip")
-	dataProviderFlag := flag.String("data-provider", "alpaca", "market data provider: alpaca or massive")
+	dataProviderFlag := flag.String("data-provider", "alpaca", "market data provider: alpaca, massive, or coinbase")
 	flag.Parse()
 
 	if *fromFlag == "" || *toFlag == "" {
@@ -65,8 +66,10 @@ func main() {
 		md = alpacaprovider.New(alpacaprovider.Config{Feed: *feedFlag})
 	case "massive":
 		md = massiveprovider.New(massiveprovider.Config{})
+	case "coinbase":
+		md = coinbaseprovider.New(coinbaseprovider.Config{})
 	default:
-		log.Fatalf("unknown data provider %q — use alpaca or massive", *dataProviderFlag)
+		log.Fatalf("unknown data provider %q — use alpaca, massive, or coinbase", *dataProviderFlag)
 	}
 	bars, err := md.FetchBarsMulti(context.Background(), symbols, *timeframeFlag, from, to)
 	if err != nil {
