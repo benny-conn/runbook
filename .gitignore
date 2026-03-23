@@ -21,3 +21,5 @@ configs/*.json
 script_example.js
 
 notes.md
+
+*.pem

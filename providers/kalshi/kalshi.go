@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -51,6 +52,11 @@ type Provider struct {
 	baseURL    string
 	httpClient *http.Client
 
+	// Rate limiters for Kalshi API (basic tier: 10 reads/sec, 10 writes/sec).
+	// We use 10/sec for reads (half the 20/sec limit) to leave headroom.
+	readLimiter  *rateLimiter
+	writeLimiter *rateLimiter
+
 	// WebSocket connection shared across subscriptions.
 	ws     *wsConn
 	wsOnce sync.Once
@@ -70,16 +76,16 @@ func New(cfg Config) *Provider {
 		var err error
 		privKey, err = parsePrivateKey([]byte(cfg.PrivateKeyPEM))
 		if err != nil {
-			log.Fatalf("kalshi: parsing private key PEM: %v", err)
+			log.Println("kalshi: parsing private key PEM: %v", err)
 		}
 	} else if keyPath != "" {
 		data, err := os.ReadFile(keyPath)
 		if err != nil {
-			log.Fatalf("kalshi: reading private key %q: %v", keyPath, err)
+			log.Println("kalshi: reading private key %q: %v", keyPath, err)
 		}
 		privKey, err = parsePrivateKey(data)
 		if err != nil {
-			log.Fatalf("kalshi: parsing private key %q: %v", keyPath, err)
+			log.Println("kalshi: parsing private key %q: %v", keyPath, err)
 		}
 	}
 
@@ -89,11 +95,13 @@ func New(cfg Config) *Provider {
 	}
 
 	p := &Provider{
-		apiKey:     apiKey,
-		privateKey: privKey,
-		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		positions:  make(map[string]int),
+		apiKey:       apiKey,
+		privateKey:   privKey,
+		baseURL:      baseURL,
+		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		readLimiter:  newRateLimiter(10), // 10 reads/sec (basic tier allows 20)
+		writeLimiter: newRateLimiter(8),  // 8 writes/sec (basic tier allows 10)
+		positions:    make(map[string]int),
 	}
 	p.ws = newWSConn(p)
 	return p
@@ -139,50 +147,136 @@ func (p *Provider) sign(timestampMS int64, method, path string) (string, error) 
 	return base64.StdEncoding.EncodeToString(sig), nil
 }
 
+// rateLimiter is a simple token-bucket rate limiter.
+type rateLimiter struct {
+	mu       sync.Mutex
+	tokens   float64
+	max      float64
+	rate     float64 // tokens per second
+	lastTime time.Time
+}
+
+func newRateLimiter(perSec float64) *rateLimiter {
+	return &rateLimiter{
+		tokens:   perSec,
+		max:      perSec,
+		rate:     perSec,
+		lastTime: time.Now(),
+	}
+}
+
+// wait blocks until a token is available or ctx is cancelled.
+func (rl *rateLimiter) wait(ctx context.Context) error {
+	for {
+		rl.mu.Lock()
+		now := time.Now()
+		elapsed := now.Sub(rl.lastTime).Seconds()
+		rl.tokens += elapsed * rl.rate
+		if rl.tokens > rl.max {
+			rl.tokens = rl.max
+		}
+		rl.lastTime = now
+
+		if rl.tokens >= 1 {
+			rl.tokens--
+			rl.mu.Unlock()
+			return nil
+		}
+
+		// Calculate wait time for next token.
+		waitDur := time.Duration((1-rl.tokens)/rl.rate*1000) * time.Millisecond
+		rl.mu.Unlock()
+
+		select {
+		case <-time.After(waitDur):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // doRequest executes an authenticated HTTP request to the Kalshi API.
+// It proactively rate-limits to stay within the basic tier (20 reads/sec, 10 writes/sec)
+// and retries on 429 responses with exponential backoff.
 func (p *Provider) doRequest(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
-	var reqBody io.Reader
+	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second}
+
+	// Proactive rate limiting.
+	limiter := p.readLimiter
+	if method != "GET" {
+		limiter = p.writeLimiter
+	}
+
+	var bodyBytes []byte
 	if body != nil {
-		data, err := json.Marshal(body)
+		var err error
+		bodyBytes, err = json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("marshaling request body: %w", err)
 		}
-		reqBody = bytes.NewReader(data)
 	}
 
-	url := p.baseURL + path
-	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
-	if err != nil {
-		return nil, err
+	for attempt := 0; ; attempt++ {
+		if err := limiter.wait(ctx); err != nil {
+			return nil, err
+		}
+
+		var reqBody io.Reader
+		if bodyBytes != nil {
+			reqBody = bytes.NewReader(bodyBytes)
+		}
+
+		url := p.baseURL + path
+		req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
+		if err != nil {
+			return nil, err
+		}
+
+		ts := time.Now().UnixMilli()
+		sig, err := p.sign(ts, method, path)
+		if err != nil {
+			return nil, fmt.Errorf("signing request: %w", err)
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("KALSHI-ACCESS-KEY", p.apiKey)
+		req.Header.Set("KALSHI-ACCESS-TIMESTAMP", fmt.Sprintf("%d", ts))
+		req.Header.Set("KALSHI-ACCESS-SIGNATURE", sig)
+
+		resp, err := p.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("http %s %s: %w", method, path, err)
+		}
+
+		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("reading response: %w", err)
+		}
+
+		if resp.StatusCode == 429 && attempt < len(backoffs) {
+			delay := backoffs[attempt]
+			// Respect Retry-After header if present.
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if secs, err := strconv.Atoi(ra); err == nil {
+					delay = time.Duration(secs) * time.Second
+				}
+			}
+			log.Printf("kalshi: rate limited on %s %s, retrying in %s (attempt %d/%d)", method, path, delay, attempt+1, len(backoffs))
+			select {
+			case <-time.After(delay):
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("kalshi API %s %s returned %d: %s", method, path, resp.StatusCode, string(respBody))
+		}
+
+		return respBody, nil
 	}
-
-	ts := time.Now().UnixMilli()
-	sig, err := p.sign(ts, method, path)
-	if err != nil {
-		return nil, fmt.Errorf("signing request: %w", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("KALSHI-ACCESS-KEY", p.apiKey)
-	req.Header.Set("KALSHI-ACCESS-TIMESTAMP", fmt.Sprintf("%d", ts))
-	req.Header.Set("KALSHI-ACCESS-SIGNATURE", sig)
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http %s %s: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("kalshi API %s %s returned %d: %s", method, path, resp.StatusCode, string(respBody))
-	}
-
-	return respBody, nil
 }
 
 // — MarketData —

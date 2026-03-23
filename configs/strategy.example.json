@@ -34,5 +34,12 @@
     "private_pem_key": ""
   },
 
+  "kalshi": {
+    "api_key": "",
+    "private_key_path": "",
+    "private_key_pem": "",
+    "demo": true
+  },
+
   "strategy": {}
 }
