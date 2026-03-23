@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"sync"
 	"time"
 
 	alp "github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
@@ -33,6 +34,13 @@ type Provider struct {
 	feed    marketdata.Feed
 	apiKey  string
 	secret  string
+
+	// Pending stream handlers registered before the single shared connection is opened.
+	streamMu     sync.Mutex
+	tradeHandler func(stream.Trade)
+	tradeSymbols []string
+	quoteHandler func(stream.Quote)
+	quoteSymbols []string
 }
 
 // New creates an Alpaca provider. Config fields override env vars where set.
@@ -125,8 +133,7 @@ func (p *Provider) FetchBarsMulti(ctx context.Context, symbols []string, timefra
 }
 
 func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timeframe string, handler func(provider.Bar)) error {
-	sc := stream.NewStocksClient(
-		p.feed,
+	opts := []stream.StockOption{
 		stream.WithCredentials(p.apiKey, p.secret),
 		stream.WithBars(func(b stream.Bar) {
 			handler(provider.Bar{
@@ -139,7 +146,20 @@ func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timefram
 				Volume:    float64(b.Volume),
 			})
 		}, symbols...),
-	)
+	}
+
+	// Include any trade/quote handlers registered before this call so
+	// everything runs over a single WebSocket connection.
+	p.streamMu.Lock()
+	if p.tradeHandler != nil {
+		opts = append(opts, stream.WithTrades(p.tradeHandler, p.tradeSymbols...))
+	}
+	if p.quoteHandler != nil {
+		opts = append(opts, stream.WithQuotes(p.quoteHandler, p.quoteSymbols...))
+	}
+	p.streamMu.Unlock()
+
+	sc := stream.NewStocksClient(p.feed, opts...)
 	if err := sc.Connect(ctx); err != nil {
 		return fmt.Errorf("alpaca bar stream connect: %w", err)
 	}
@@ -148,21 +168,20 @@ func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timefram
 }
 
 func (p *Provider) SubscribeTrades(ctx context.Context, symbols []string, handler func(provider.Trade)) error {
-	sc := stream.NewStocksClient(
-		p.feed,
-		stream.WithCredentials(p.apiKey, p.secret),
-		stream.WithTrades(func(t stream.Trade) {
-			handler(provider.Trade{
-				Symbol:    t.Symbol,
-				Timestamp: t.Timestamp,
-				Price:     t.Price,
-				Size:      float64(t.Size),
-			})
-		}, symbols...),
-	)
-	if err := sc.Connect(ctx); err != nil {
-		return fmt.Errorf("alpaca trade stream connect: %w", err)
+	// Register the trade handler to be included in the shared stream connection
+	// created by SubscribeBars. This avoids opening multiple WebSocket connections
+	// which would exceed Alpaca's per-key connection limit.
+	p.streamMu.Lock()
+	p.tradeHandler = func(t stream.Trade) {
+		handler(provider.Trade{
+			Symbol:    t.Symbol,
+			Timestamp: t.Timestamp,
+			Price:     t.Price,
+			Size:      float64(t.Size),
+		})
 	}
+	p.tradeSymbols = symbols
+	p.streamMu.Unlock()
 	<-ctx.Done()
 	return nil
 }
@@ -251,23 +270,21 @@ func (p *Provider) SubscribeFills(ctx context.Context, handler func(provider.Fil
 }
 
 func (p *Provider) SubscribeQuotes(ctx context.Context, symbols []string, handler func(provider.Quote)) error {
-	sc := stream.NewStocksClient(
-		p.feed,
-		stream.WithCredentials(p.apiKey, p.secret),
-		stream.WithQuotes(func(q stream.Quote) {
-			handler(provider.Quote{
-				Symbol:    q.Symbol,
-				Timestamp: q.Timestamp,
-				BidPrice:  q.BidPrice,
-				BidSize:   float64(q.BidSize),
-				AskPrice:  q.AskPrice,
-				AskSize:   float64(q.AskSize),
-			})
-		}, symbols...),
-	)
-	if err := sc.Connect(ctx); err != nil {
-		return fmt.Errorf("alpaca quote stream connect: %w", err)
+	// Register the quote handler to be included in the shared stream connection
+	// created by SubscribeBars.
+	p.streamMu.Lock()
+	p.quoteHandler = func(q stream.Quote) {
+		handler(provider.Quote{
+			Symbol:    q.Symbol,
+			Timestamp: q.Timestamp,
+			BidPrice:  q.BidPrice,
+			BidSize:   float64(q.BidSize),
+			AskPrice:  q.AskPrice,
+			AskSize:   float64(q.AskSize),
+		})
 	}
+	p.quoteSymbols = symbols
+	p.streamMu.Unlock()
 	<-ctx.Done()
 	return nil
 }
