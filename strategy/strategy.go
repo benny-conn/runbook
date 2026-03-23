@@ -167,18 +167,29 @@ type SymbolResolver interface {
 
 // DiscoveredMarket represents a tradeable market returned by MarketDiscovery.
 type DiscoveredMarket struct {
-	Ticker      string
-	Title       string
-	Status      string // "open", "closed", "settled"
-	EventTicker string
-	Volume      int
-	OpenTime    time.Time
-	CloseTime   time.Time
+	Ticker       string
+	Title        string
+	Status       string // "open", "closed", "settled"
+	EventTicker  string
+	SeriesTicker string
+	Volume       int
+	Volume24H    int
+	OpenTime     time.Time
+	CloseTime    time.Time
+}
+
+// MarketListOptions controls filtering and pagination for ListMarkets.
+type MarketListOptions struct {
+	Status       string // "open", "closed", "settled", "" for all
+	Limit        int    // max markets to return (0 = default 200, hard cap 1000)
+	SeriesTicker string // filter by series (e.g. "KXMVE" for politics)
+	EventTicker  string // filter by specific event
+	MinVolume    int    // only return markets with volume >= this (client-side filter)
 }
 
 // MarketDiscovery is an optional interface a provider can implement to expose
 // market listing and discovery capabilities. Prediction market providers like
 // Kalshi implement this so strategies can find active markets to trade.
 type MarketDiscovery interface {
-	ListMarkets(ctx context.Context, status string) ([]DiscoveredMarket, error)
+	ListMarkets(ctx context.Context, opts MarketListOptions) ([]DiscoveredMarket, error)
 }

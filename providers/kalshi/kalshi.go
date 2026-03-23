@@ -614,28 +614,63 @@ func (p *Provider) handleSettlement(ticker, result string, handler func(provider
 // — MarketDiscovery —
 
 // ListMarkets implements strategy.MarketDiscovery. Fetches markets from the
-// Kalshi catalog, filtered by status ("open", "closed", "settled", or "" for all).
-func (p *Provider) ListMarkets(ctx context.Context, status string) ([]strategy.DiscoveredMarket, error) {
-	path := "/markets"
-	if status != "" {
-		path += "?status=" + status
+// Kalshi catalog with filtering and pagination controls.
+func (p *Provider) ListMarkets(ctx context.Context, opts strategy.MarketListOptions) ([]strategy.DiscoveredMarket, error) {
+	// Apply defaults and hard cap.
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	// Build base query params.
+	params := make([]string, 0, 6)
+	if opts.Status != "" {
+		params = append(params, "status="+opts.Status)
+	}
+	if opts.SeriesTicker != "" {
+		params = append(params, "series_ticker="+opts.SeriesTicker)
+	}
+	if opts.EventTicker != "" {
+		params = append(params, "event_ticker="+opts.EventTicker)
+	}
+	// Request up to limit per page (Kalshi max 1000).
+	pageSize := limit
+	if pageSize > 1000 {
+		pageSize = 1000
+	}
+	params = append(params, fmt.Sprintf("limit=%d", pageSize))
+
+	basePath := "/markets"
+	if len(params) > 0 {
+		basePath += "?" + strings.Join(params, "&")
 	}
 
 	var allMarkets []apiMarket
 	cursor := ""
 
 	for {
-		reqPath := path
+		select {
+		case <-ctx.Done():
+			break // return what we have so far
+		default:
+		}
+		if ctx.Err() != nil {
+			break
+		}
+
+		reqPath := basePath
 		if cursor != "" {
-			sep := "?"
-			if strings.Contains(reqPath, "?") {
-				sep = "&"
-			}
-			reqPath += sep + "cursor=" + cursor
+			reqPath += "&cursor=" + cursor
 		}
 
 		data, err := p.doRequest(ctx, "GET", reqPath, nil)
 		if err != nil {
+			if ctx.Err() != nil {
+				break // context cancelled mid-request, return partial results
+			}
 			return nil, fmt.Errorf("kalshi list markets: %w", err)
 		}
 
@@ -646,23 +681,34 @@ func (p *Provider) ListMarkets(ctx context.Context, status string) ([]strategy.D
 
 		allMarkets = append(allMarkets, resp.Markets...)
 
-		if resp.Cursor == "" {
+		if len(allMarkets) >= limit || resp.Cursor == "" {
 			break
 		}
 		cursor = resp.Cursor
 	}
 
-	result := make([]strategy.DiscoveredMarket, len(allMarkets))
-	for i, m := range allMarkets {
-		result[i] = strategy.DiscoveredMarket{
-			Ticker:      m.Ticker,
-			Title:       m.Title,
-			Status:      m.Status,
-			EventTicker: m.EventTicker,
-			Volume:      m.Volume,
-			OpenTime:    m.OpenTime,
-			CloseTime:   m.CloseTime,
+	// Truncate to limit.
+	if len(allMarkets) > limit {
+		allMarkets = allMarkets[:limit]
+	}
+
+	// Build result with optional client-side min volume filter.
+	result := make([]strategy.DiscoveredMarket, 0, len(allMarkets))
+	for _, m := range allMarkets {
+		if opts.MinVolume > 0 && m.Volume24H < opts.MinVolume {
+			continue
 		}
+		result = append(result, strategy.DiscoveredMarket{
+			Ticker:       m.Ticker,
+			Title:        m.Title,
+			Status:       m.Status,
+			EventTicker:  m.EventTicker,
+			SeriesTicker: m.SeriesTicker,
+			Volume:       m.Volume,
+			Volume24H:    m.Volume24H,
+			OpenTime:     m.OpenTime,
+			CloseTime:    m.CloseTime,
+		})
 	}
 	return result, nil
 }

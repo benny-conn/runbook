@@ -347,11 +347,8 @@ func (s *ScriptStrategy) ResolveSymbols(ctx strategy.InitContext) ([]string, err
 
 	if ctx.Discovery != nil {
 		arg.Set("listMarkets", func(call goja.FunctionCall) goja.Value {
-			status := "open"
-			if len(call.Arguments) > 0 && !goja.IsUndefined(call.Argument(0)) {
-				status = call.Argument(0).String()
-			}
-			markets, err := ctx.Discovery.ListMarkets(context.Background(), status)
+			opts := parseMarketListOpts(s.vm, call)
+			markets, err := ctx.Discovery.ListMarkets(context.Background(), opts)
 			if err != nil {
 				panic(s.vm.NewGoError(err))
 			}
@@ -391,11 +388,8 @@ func (s *ScriptStrategy) OnInit(ctx strategy.InitContext) error {
 	if ctx.Discovery != nil {
 		kalshiObj := s.vm.NewObject()
 		kalshiObj.Set("listMarkets", func(call goja.FunctionCall) goja.Value {
-			status := "open"
-			if len(call.Arguments) > 0 && !goja.IsUndefined(call.Argument(0)) {
-				status = call.Argument(0).String()
-			}
-			markets, err := ctx.Discovery.ListMarkets(context.Background(), status)
+			opts := parseMarketListOpts(s.vm, call)
+			markets, err := ctx.Discovery.ListMarkets(context.Background(), opts)
 			if err != nil {
 				panic(s.vm.NewGoError(err))
 			}
@@ -607,18 +601,55 @@ func getFloatField(m map[string]interface{}, key string) float64 {
 	return 0
 }
 
+// parseMarketListOpts extracts MarketListOptions from a JS function call.
+// Accepts either a string (backward-compatible status) or an options object.
+func parseMarketListOpts(vm *goja.Runtime, call goja.FunctionCall) strategy.MarketListOptions {
+	opts := strategy.MarketListOptions{Status: "open"}
+	if len(call.Arguments) == 0 || goja.IsUndefined(call.Argument(0)) {
+		return opts
+	}
+
+	arg := call.Argument(0)
+	// Backward-compatible: bare string means status.
+	if _, ok := arg.Export().(string); ok {
+		opts.Status = arg.String()
+		return opts
+	}
+
+	// Options object.
+	obj := arg.ToObject(vm)
+	if v := obj.Get("status"); v != nil && !goja.IsUndefined(v) {
+		opts.Status = v.String()
+	}
+	if v := obj.Get("limit"); v != nil && !goja.IsUndefined(v) {
+		opts.Limit = int(v.ToInteger())
+	}
+	if v := obj.Get("seriesTicker"); v != nil && !goja.IsUndefined(v) {
+		opts.SeriesTicker = v.String()
+	}
+	if v := obj.Get("eventTicker"); v != nil && !goja.IsUndefined(v) {
+		opts.EventTicker = v.String()
+	}
+	if v := obj.Get("minVolume"); v != nil && !goja.IsUndefined(v) {
+		opts.MinVolume = int(v.ToInteger())
+	}
+	return opts
+}
+
 // marketsToJS converts discovered markets into a JS-friendly slice of maps.
 func marketsToJS(markets []strategy.DiscoveredMarket) []interface{} {
 	result := make([]interface{}, len(markets))
 	for i, m := range markets {
 		result[i] = map[string]interface{}{
-			"ticker":      m.Ticker,
-			"title":       m.Title,
-			"status":      m.Status,
-			"eventTicker": m.EventTicker,
-			"volume":      m.Volume,
-			"openTime":    m.OpenTime.UnixMilli(),
-			"closeTime":   m.CloseTime.UnixMilli(),
+			"ticker":       m.Ticker,
+			"title":        m.Title,
+			"status":       m.Status,
+			"eventTicker":  m.EventTicker,
+			"seriesTicker": m.SeriesTicker,
+			"volume":       m.Volume,
+			"volume24h":    m.Volume24H,
+			"openTime":     m.OpenTime.UnixMilli(),
+			"closeTime":    m.CloseTime.UnixMilli(),
 		}
 	}
 	return result
