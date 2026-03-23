@@ -123,14 +123,66 @@ func (e *Engine) fillOrders(orders []strategy.Order, symbolPrices map[string]flo
 	return trades
 }
 
-// tickDate returns the calendar date string (YYYY-MM-DD) for a tick timestamp.
-func tickDate(t time.Time) string {
-	return t.Format("2006-01-02")
+// dayPrices holds precomputed open/close prices for all symbols on a given day.
+type dayPrices struct {
+	date      string
+	opens     map[string]float64 // symbol → open price
+	closes    map[string]float64 // symbol → close price
+	firstTime time.Time          // timestamp of the first tick on this day
+}
+
+// precomputeDayPrices groups ticks by calendar date and extracts per-symbol
+// open (first tick) and close (last tick) prices for each day. This allows
+// lifecycle hooks to fill at correct per-symbol prices for the entire day,
+// regardless of which symbol's tick triggers the day boundary.
+func precomputeDayPrices(ticks []strategy.Tick) []dayPrices {
+	var days []dayPrices
+	var current *dayPrices
+
+	for _, tick := range ticks {
+		date := tick.Timestamp.Format("2006-01-02")
+		if current == nil || current.date != date {
+			if current != nil {
+				days = append(days, *current)
+			}
+			current = &dayPrices{
+				date:      date,
+				opens:     make(map[string]float64),
+				closes:    make(map[string]float64),
+				firstTime: tick.Timestamp,
+			}
+		}
+		// First tick for this symbol on this day → open price.
+		if _, seen := current.opens[tick.Symbol]; !seen {
+			current.opens[tick.Symbol] = tick.Open
+		}
+		// Always update close to the latest tick for this symbol on this day.
+		current.closes[tick.Symbol] = tick.Close
+	}
+	if current != nil {
+		days = append(days, *current)
+	}
+	return days
+}
+
+// recordEquity snapshots the current equity and updates drawdown tracking.
+func recordEquity(equity float64, equityCurve *[]float64, peakEquity, maxDrawdown *float64) {
+	*equityCurve = append(*equityCurve, equity)
+	if equity > *peakEquity {
+		*peakEquity = equity
+	}
+	if *peakEquity > 0 {
+		dd := (*peakEquity - equity) / *peakEquity * 100
+		if dd > *maxDrawdown {
+			*maxDrawdown = dd
+		}
+	}
 }
 
 // Run replays ticks chronologically, simulates fills at the next bar's open,
 // and returns full performance metrics. If the strategy implements
-// DailySessionHandler, OnMarketOpen/OnMarketClose are called at day boundaries.
+// DailySessionHandler, OnMarketOpen/OnMarketClose are called at day boundaries
+// with correct per-symbol prices.
 func (e *Engine) Run(ticks []strategy.Tick) *Results {
 	if len(ticks) == 0 {
 		return &Results{InitialCapital: e.portfolio.Cash()}
@@ -145,10 +197,12 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 	// Check if the strategy supports daily session hooks.
 	dsh, hasDailyHooks := e.strategy.(strategy.DailySessionHandler)
 
-	// latestPrices tracks the most recent open/close per symbol, used for
-	// filling lifecycle hook orders at the correct per-symbol price.
-	latestOpen := make(map[string]float64)
-	latestClose := make(map[string]float64)
+	// Precompute per-day prices for lifecycle hook fills.
+	var days []dayPrices
+	var dayIndex int // current position in the days slice
+	if hasDailyHooks {
+		days = precomputeDayPrices(ticks)
+	}
 
 	var (
 		trades      []Trade
@@ -159,62 +213,42 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 	)
 
 	for i, tick := range ticks {
-		// Detect day boundaries BEFORE updating prices so that OnMarketClose
-		// fills use the previous day's close (not the new day's values).
-		if hasDailyHooks {
-			date := tickDate(tick.Timestamp)
-			if currentDate == "" {
-				// First tick — update prices first, then fire market open.
-				currentDate = date
-				e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
-				latestOpen[tick.Symbol] = tick.Open
-				latestClose[tick.Symbol] = tick.Close
-				openOrders := dsh.OnMarketOpen(e.portfolio)
-				if len(openOrders) > 0 {
-					trades = append(trades, e.fillOrders(openOrders, latestOpen, tick.Timestamp)...)
-				}
-			} else if date != currentDate {
-				// Day changed — fire market close using YESTERDAY's prices (still in latestClose).
+		// Update market prices so Equity() stays accurate.
+		e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
+
+		date := tick.Timestamp.Format("2006-01-02")
+
+		// --- Day boundary handling for strategies with lifecycle hooks ---
+		if hasDailyHooks && date != currentDate {
+			if currentDate != "" {
+				// End of previous day: snapshot equity, then fire OnMarketClose.
+				recordEquity(e.portfolio.Equity(), &equityCurve, &peakEquity, &maxDrawdown)
+
+				prevDay := days[dayIndex]
 				closeOrders := dsh.OnMarketClose(e.portfolio)
 				if len(closeOrders) > 0 {
-					trades = append(trades, e.fillOrders(closeOrders, latestClose, tick.Timestamp)...)
+					trades = append(trades, e.fillOrders(closeOrders, prevDay.closes, tick.Timestamp)...)
 				}
-				// Now update to new day's prices.
-				currentDate = date
-				e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
-				latestOpen[tick.Symbol] = tick.Open
-				latestClose[tick.Symbol] = tick.Close
-				openOrders := dsh.OnMarketOpen(e.portfolio)
-				if len(openOrders) > 0 {
-					trades = append(trades, e.fillOrders(openOrders, latestOpen, tick.Timestamp)...)
-				}
-			} else {
-				// Same day — just update prices.
-				e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
-				latestOpen[tick.Symbol] = tick.Open
-				latestClose[tick.Symbol] = tick.Close
+				dayIndex++
 			}
-		} else {
-			// No daily hooks — just update prices.
-			e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
-			latestOpen[tick.Symbol] = tick.Open
-			latestClose[tick.Symbol] = tick.Close
-		}
 
-		eq := e.portfolio.Equity()
-		equityCurve = append(equityCurve, eq)
-
-		if eq > peakEquity {
-			peakEquity = eq
-		}
-		if peakEquity > 0 {
-			dd := (peakEquity - eq) / peakEquity * 100
-			if dd > maxDrawdown {
-				maxDrawdown = dd
+			// Start of new day: update all symbols to today's open prices,
+			// then fire OnMarketOpen.
+			currentDate = date
+			newDay := days[dayIndex]
+			for sym, openPrice := range newDay.opens {
+				e.portfolio.UpdateMarketPrice(sym, openPrice)
 			}
+			openOrders := dsh.OnMarketOpen(e.portfolio)
+			if len(openOrders) > 0 {
+				trades = append(trades, e.fillOrders(openOrders, newDay.opens, tick.Timestamp)...)
+			}
+		} else if !hasDailyHooks {
+			// For non-daily strategies, record equity on every tick.
+			recordEquity(e.portfolio.Equity(), &equityCurve, &peakEquity, &maxDrawdown)
 		}
 
-		// Ask the strategy what to do.
+		// --- Ask the strategy what to do ---
 		orders := e.strategy.OnTick(tick, e.portfolio)
 		if len(orders) == 0 {
 			continue
@@ -235,14 +269,20 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 
 	// Fire final market close if the strategy uses daily hooks.
 	if hasDailyHooks && currentDate != "" {
+		// Snapshot end-of-last-day equity.
+		recordEquity(e.portfolio.Equity(), &equityCurve, &peakEquity, &maxDrawdown)
+
+		lastDay := days[dayIndex]
 		closeOrders := dsh.OnMarketClose(e.portfolio)
 		if len(closeOrders) > 0 {
 			lastTick := ticks[len(ticks)-1]
-			trades = append(trades, e.fillOrders(closeOrders, latestClose, lastTick.Timestamp)...)
+			trades = append(trades, e.fillOrders(closeOrders, lastDay.closes, lastTick.Timestamp)...)
 		}
 	}
 
+	// Final equity snapshot.
 	finalEquity := e.portfolio.Equity()
+	recordEquity(finalEquity, &equityCurve, &peakEquity, &maxDrawdown)
 
 	wins, losses := 0, 0
 	for _, t := range trades {
