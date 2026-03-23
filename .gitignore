@@ -17,3 +17,5 @@ references/
 
 configs/*.json
 !configs/strategy.example.json
+
+script_example.js

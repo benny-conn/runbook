@@ -64,15 +64,31 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 
 	bars, err := e.md.FetchBarsMulti(ctx, symbols, e.config.Timeframe, start, end)
 	if err != nil {
-		return fmt.Errorf("fetching warm-up bars: %w", err)
+		log.Printf("recovery: warm-up bar fetch failed (non-fatal, skipping replay): %v", err)
+	} else {
+		log.Printf("recovery: replaying %d bars through strategy (simulating fills locally)...", len(bars))
+
+		for _, b := range bars {
+			tick := provider.BarToTick(b)
+			e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
+			orders := e.strategy.OnTick(tick, e.portfolio)
+			simulateFills(e.strategy, e.portfolio, orders, tick)
+		}
 	}
 
-	log.Printf("recovery: replaying %d bars through strategy (no orders placed)...", len(bars))
-
-	for _, b := range bars {
-		tick := provider.BarToTick(b)
-		e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
-		e.strategy.OnTick(tick, e.portfolio) // returned orders intentionally discarded
+	// Reset portfolio to the real broker state after warmup replay.
+	// Simulated fills shifted balances/positions — restore truth before going live.
+	e.portfolio = portfolio.NewSimulatedPortfolio(account.Cash)
+	for _, pos := range positions {
+		e.portfolio.ApplyFill(strategy.Fill{
+			Symbol: pos.Symbol,
+			Side:   "buy",
+			Qty:    pos.Qty,
+			Price:  pos.AvgEntryPrice,
+		})
+		if pos.CurrentPrice > 0 {
+			e.portfolio.UpdateMarketPrice(pos.Symbol, pos.CurrentPrice)
+		}
 	}
 
 	// If the strategy supports position injection, tell it what we currently hold.
@@ -86,6 +102,28 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 
 	log.Println("recovery: complete — ready to trade")
 	return nil
+}
+
+// simulateFills locally fills market orders during warmup replay so that
+// stateful strategies (like the script ORB) transition correctly through
+// their lifecycle. Non-market orders are ignored — limit/stop fills can't
+// be reliably simulated from bar data alone.
+func simulateFills(strat strategy.Strategy, port *portfolio.SimulatedPortfolio, orders []strategy.Order, tick strategy.Tick) {
+	for _, o := range orders {
+		if o.OrderType != "market" && o.OrderType != "" {
+			continue
+		}
+		fill := strategy.Fill{
+			Symbol:    o.Symbol,
+			Side:      o.Side,
+			Qty:       o.Qty,
+			Price:     tick.Close,
+			Timestamp: tick.Timestamp,
+		}
+		port.ApplyFill(fill)
+		strat.OnFill(fill)
+		log.Printf("recovery: simulated fill %s %s qty=%.2f @ $%.4f", fill.Side, fill.Symbol, fill.Qty, fill.Price)
+	}
 }
 
 // warmupWindow returns how far back to fetch historical bars.

@@ -201,6 +201,10 @@ func resolveStrategy(name, scriptPath string, strategyCfg json.RawMessage) (stra
 			}
 		}
 		scriptName := strings.TrimSuffix(filepath.Base(scriptPath), filepath.Ext(scriptPath))
+		log.Printf("script strategy config: script=%s name=%s", scriptPath, scriptName)
+		for k, v := range cfg {
+			log.Printf("  %s=%s", k, v)
+		}
 		return script.New(scriptName, string(src), cfg)
 	default:
 		return nil, fmt.Errorf("available strategies: ma_crossover, rsi_pullback, script")
