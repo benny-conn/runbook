@@ -18,6 +18,7 @@ import (
 	alpacaprovider "github.com/benny-conn/brandon-bot/providers/alpaca"
 	coinbaseprovider "github.com/benny-conn/brandon-bot/providers/coinbase"
 	ibkrprovider "github.com/benny-conn/brandon-bot/providers/ibkr"
+	kalshiprovider "github.com/benny-conn/brandon-bot/providers/kalshi"
 	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
 	topstepxprovider "github.com/benny-conn/brandon-bot/providers/topstepx"
 	tradovateprovider "github.com/benny-conn/brandon-bot/providers/tradovate"
@@ -37,6 +38,7 @@ type RunConfig struct {
 	TopstepX  topstepxprovider.Config  `json:"topstepx"`
 	Massive   massiveprovider.Config   `json:"massive"`
 	Coinbase  coinbaseprovider.Config  `json:"coinbase"`
+	Kalshi    kalshiprovider.Config    `json:"kalshi"`
 	Strategy  json.RawMessage          `json:"strategy"`
 }
 
@@ -45,7 +47,7 @@ func main() {
 	symbolsFlag := flag.String("symbols", "AAPL", "comma-separated list of symbols")
 	capitalFlag := flag.Float64("capital", 10000, "starting capital in USD")
 	timeframeFlag := flag.String("timeframe", "1m", "bar timeframe: 1s, 1m, 5m, 15m, 1h, 1d")
-	providerFlag := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, tradovate, topstepx, or coinbase")
+	providerFlag := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, tradovate, topstepx, coinbase, or kalshi")
 	dataProviderFlag := flag.String("data-provider", "", "market data provider override: massive, alpaca, ibkr, tradovate, coinbase")
 	execProviderFlag := flag.String("exec-provider", "", "execution provider override: alpaca, ibkr, tradovate, coinbase")
 	scriptFlag := flag.String("script", "", "path to a .js script file (required when --strategy=script)")
@@ -113,8 +115,11 @@ func main() {
 		case "coinbase":
 			p := coinbaseprovider.New(runCfg.Coinbase)
 			md, exec = p, p
+		case "kalshi":
+			p := kalshiprovider.New(runCfg.Kalshi)
+			md, exec = p, p
 		default:
-			log.Fatalf("unknown provider %q — use alpaca, ibkr, tradovate, topstepx, or coinbase", *providerFlag)
+			log.Fatalf("unknown provider %q — use alpaca, ibkr, tradovate, topstepx, coinbase, or kalshi", *providerFlag)
 		}
 	}
 
@@ -152,8 +157,10 @@ func resolveMarketData(name string, cfg *RunConfig) provider.MarketData {
 		return massiveprovider.New(cfg.Massive)
 	case "coinbase":
 		return coinbaseprovider.New(cfg.Coinbase)
+	case "kalshi":
+		return kalshiprovider.New(cfg.Kalshi)
 	default:
-		log.Fatalf("unknown data provider %q — use massive, alpaca, ibkr, tradovate, topstepx, or coinbase", name)
+		log.Fatalf("unknown data provider %q — use massive, alpaca, ibkr, tradovate, topstepx, coinbase, or kalshi", name)
 		return nil
 	}
 }
@@ -170,8 +177,10 @@ func resolveExecution(name string, cfg *RunConfig) provider.Execution {
 		return topstepxprovider.New(cfg.TopstepX)
 	case "coinbase":
 		return coinbaseprovider.New(cfg.Coinbase)
+	case "kalshi":
+		return kalshiprovider.New(cfg.Kalshi)
 	default:
-		log.Fatalf("unknown exec provider %q — use alpaca, ibkr, tradovate, topstepx, or coinbase", name)
+		log.Fatalf("unknown exec provider %q — use alpaca, ibkr, tradovate, topstepx, coinbase, or kalshi", name)
 		return nil
 	}
 }

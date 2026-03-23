@@ -1,6 +1,9 @@
 package strategy
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Tick represents a single OHLCV bar for a symbol.
 type Tick struct {
@@ -109,11 +112,21 @@ type QuoteSubscriber interface {
 	OnQuote(quote Quote, portfolio Portfolio) []Order
 }
 
-// InitContext holds the context passed to a strategy's OnInit hook.
+// InitContext holds the context passed to a strategy's OnInit hook and
+// SymbolResolver.ResolveSymbols.
 type InitContext struct {
 	Symbols   []string
 	Timeframe string
 	Config    []byte // raw JSON config (nil if none)
+
+	// Discovery provides market listing capabilities if the provider supports it
+	// (e.g. Kalshi's market catalog). Nil if the provider doesn't implement MarketDiscovery.
+	Discovery MarketDiscovery
+
+	// AddSymbols dynamically subscribes to new symbols mid-run. Call from OnTick,
+	// OnFill, etc. to start streaming data for new symbols without restarting.
+	// Nil during backtest or before the live stream starts.
+	AddSymbols func(symbols ...string)
 }
 
 // Initializer is an optional interface a strategy can implement to run setup
@@ -141,4 +154,31 @@ type DailySessionHandler interface {
 // releasing resources).
 type Shutdowner interface {
 	OnExit()
+}
+
+// SymbolResolver is an optional interface a strategy can implement to
+// dynamically determine which symbols to trade. Called once during engine
+// startup, before OnInit and before any subscriptions. The returned symbols
+// are merged with any CLI-provided symbols. If the strategy doesn't implement
+// this, only CLI symbols are used.
+type SymbolResolver interface {
+	ResolveSymbols(ctx InitContext) ([]string, error)
+}
+
+// DiscoveredMarket represents a tradeable market returned by MarketDiscovery.
+type DiscoveredMarket struct {
+	Ticker      string
+	Title       string
+	Status      string // "open", "closed", "settled"
+	EventTicker string
+	Volume      int
+	OpenTime    time.Time
+	CloseTime   time.Time
+}
+
+// MarketDiscovery is an optional interface a provider can implement to expose
+// market listing and discovery capabilities. Prediction market providers like
+// Kalshi implement this so strategies can find active markets to trade.
+type MarketDiscovery interface {
+	ListMarkets(ctx context.Context, status string) ([]DiscoveredMarket, error)
 }

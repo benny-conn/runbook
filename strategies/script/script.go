@@ -1,6 +1,7 @@
 package script
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ var (
 	_ strategy.Initializer         = (*ScriptStrategy)(nil)
 	_ strategy.DailySessionHandler = (*ScriptStrategy)(nil)
 	_ strategy.Shutdowner          = (*ScriptStrategy)(nil)
+	_ strategy.SymbolResolver      = (*ScriptStrategy)(nil)
 )
 
 const (
@@ -30,19 +32,20 @@ const maxRuntimeErrors = 10
 
 // ScriptStrategy implements strategy.Strategy via a Goja JS runtime.
 type ScriptStrategy struct {
-	mu            sync.Mutex
-	vm            *goja.Runtime
-	onTick        goja.Callable
-	onFill        goja.Callable
-	onTrade       goja.Callable
-	onInit        goja.Callable
-	onMarketOpen  goja.Callable
-	onMarketClose goja.Callable
-	onExit        goja.Callable
-	name          string
-	runtimeErrors []string
-	errorSeen     map[string]bool
-	dataGlobal    *dataGlobal // nil if no MarketData provider
+	mu             sync.Mutex
+	vm             *goja.Runtime
+	onTick         goja.Callable
+	onFill         goja.Callable
+	onTrade        goja.Callable
+	onInit         goja.Callable
+	onMarketOpen   goja.Callable
+	onMarketClose  goja.Callable
+	onExit         goja.Callable
+	resolveSymbols goja.Callable
+	name           string
+	runtimeErrors  []string
+	errorSeen      map[string]bool
+	dataGlobal     *dataGlobal // nil if no MarketData provider
 }
 
 // New creates a ScriptStrategy by compiling src in a Goja runtime.
@@ -197,17 +200,18 @@ func New(name, src string, config map[string]string, opts ...Option) (*ScriptStr
 	}
 
 	return &ScriptStrategy{
-		vm:            vm,
-		onTick:        onTick,
-		onFill:        extractOptional("onFill"),
-		onTrade:       extractOptional("onTrade"),
-		onInit:        extractOptional("onInit"),
-		onMarketOpen:  extractOptional("onMarketOpen"),
-		onMarketClose: extractOptional("onMarketClose"),
-		onExit:        extractOptional("onExit"),
-		name:          name,
-		errorSeen:     make(map[string]bool),
-		dataGlobal:    dg,
+		vm:             vm,
+		onTick:         onTick,
+		onFill:         extractOptional("onFill"),
+		onTrade:        extractOptional("onTrade"),
+		onInit:         extractOptional("onInit"),
+		onMarketOpen:   extractOptional("onMarketOpen"),
+		onMarketClose:  extractOptional("onMarketClose"),
+		onExit:         extractOptional("onExit"),
+		resolveSymbols: extractOptional("resolveSymbols"),
+		name:           name,
+		errorSeen:      make(map[string]bool),
+		dataGlobal:     dg,
 	}, nil
 }
 
@@ -324,16 +328,99 @@ func (s *ScriptStrategy) HasOnTrade() bool {
 }
 
 // ---------------------------------------------------------------------------
+// strategy.SymbolResolver (optional)
+// ---------------------------------------------------------------------------
+
+// ResolveSymbols implements strategy.SymbolResolver. Calls the JS
+// resolveSymbols(ctx) function if defined, where ctx exposes market discovery.
+func (s *ScriptStrategy) ResolveSymbols(ctx strategy.InitContext) ([]string, error) {
+	if s.resolveSymbols == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Build a context argument with discovery capabilities.
+	arg := s.vm.NewObject()
+	arg.Set("symbols", ctx.Symbols)
+	arg.Set("timeframe", ctx.Timeframe)
+
+	if ctx.Discovery != nil {
+		arg.Set("listMarkets", func(call goja.FunctionCall) goja.Value {
+			status := "open"
+			if len(call.Arguments) > 0 && !goja.IsUndefined(call.Argument(0)) {
+				status = call.Argument(0).String()
+			}
+			markets, err := ctx.Discovery.ListMarkets(context.Background(), status)
+			if err != nil {
+				panic(s.vm.NewGoError(err))
+			}
+			return s.vm.ToValue(marketsToJS(markets))
+		})
+	}
+
+	result, err := s.resolveSymbols(goja.Undefined(), arg)
+	if err != nil {
+		return nil, fmt.Errorf("script resolveSymbols error: %w", err)
+	}
+
+	exported := result.Export()
+	arr, ok := exported.([]interface{})
+	if !ok {
+		return nil, nil
+	}
+	symbols := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if str, ok := v.(string); ok && str != "" {
+			symbols = append(symbols, str)
+		}
+	}
+	return symbols, nil
+}
+
+// ---------------------------------------------------------------------------
 // strategy.Initializer (optional)
 // ---------------------------------------------------------------------------
 
 // OnInit implements strategy.Initializer.
 func (s *ScriptStrategy) OnInit(ctx strategy.InitContext) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Register kalshi global if provider supports market discovery.
+	if ctx.Discovery != nil {
+		kalshiObj := s.vm.NewObject()
+		kalshiObj.Set("listMarkets", func(call goja.FunctionCall) goja.Value {
+			status := "open"
+			if len(call.Arguments) > 0 && !goja.IsUndefined(call.Argument(0)) {
+				status = call.Argument(0).String()
+			}
+			markets, err := ctx.Discovery.ListMarkets(context.Background(), status)
+			if err != nil {
+				panic(s.vm.NewGoError(err))
+			}
+			return s.vm.ToValue(marketsToJS(markets))
+		})
+		s.vm.Set("kalshi", kalshiObj)
+	}
+
+	// Register engine global for mid-run symbol management.
+	if ctx.AddSymbols != nil {
+		engineObj := s.vm.NewObject()
+		engineObj.Set("addSymbols", func(call goja.FunctionCall) goja.Value {
+			syms := make([]string, len(call.Arguments))
+			for i, arg := range call.Arguments {
+				syms[i] = arg.String()
+			}
+			ctx.AddSymbols(syms...)
+			return goja.Undefined()
+		})
+		s.vm.Set("engine", engineObj)
+	}
+
 	if s.onInit == nil {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	ctxVal := s.vm.ToValue(map[string]interface{}{
 		"symbols":   ctx.Symbols,
@@ -518,4 +605,21 @@ func getFloatField(m map[string]interface{}, key string) float64 {
 		return float64(vt)
 	}
 	return 0
+}
+
+// marketsToJS converts discovered markets into a JS-friendly slice of maps.
+func marketsToJS(markets []strategy.DiscoveredMarket) []interface{} {
+	result := make([]interface{}, len(markets))
+	for i, m := range markets {
+		result[i] = map[string]interface{}{
+			"ticker":      m.Ticker,
+			"title":       m.Title,
+			"status":      m.Status,
+			"eventTicker": m.EventTicker,
+			"volume":      m.Volume,
+			"openTime":    m.OpenTime.UnixMilli(),
+			"closeTime":   m.CloseTime.UnixMilli(),
+		}
+	}
+	return result
 }

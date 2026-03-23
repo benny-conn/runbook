@@ -14,6 +14,7 @@ import (
 	"github.com/benny-conn/brandon-bot/provider"
 	alpacaprovider "github.com/benny-conn/brandon-bot/providers/alpaca"
 	coinbaseprovider "github.com/benny-conn/brandon-bot/providers/coinbase"
+	kalshiprovider "github.com/benny-conn/brandon-bot/providers/kalshi"
 	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
 	topstepxprovider "github.com/benny-conn/brandon-bot/providers/topstepx"
 	"github.com/benny-conn/brandon-bot/strategies"
@@ -28,7 +29,7 @@ func main() {
 	timeframeFlag := flag.String("timeframe", "1d", "bar timeframe: 1m, 5m, 15m, 1h, 1d")
 	capital := flag.Float64("capital", 10000, "starting capital in USD")
 	feedFlag := flag.String("feed", "iex", "Alpaca feed: iex or sip")
-	dataProviderFlag := flag.String("data-provider", "alpaca", "market data provider: alpaca, massive, or coinbase")
+	dataProviderFlag := flag.String("data-provider", "alpaca", "market data provider: alpaca, massive, coinbase, or kalshi")
 	configFlag := flag.String("config", "", "path to JSON config file for the strategy")
 	flag.Parse()
 
@@ -97,8 +98,10 @@ func main() {
 		md = topstepxprovider.New(topstepxprovider.Config{})
 	case "coinbase":
 		md = coinbaseprovider.New(coinbaseprovider.Config{})
+	case "kalshi":
+		md = kalshiprovider.New(kalshiprovider.Config{})
 	default:
-		log.Fatalf("unknown data provider %q — use alpaca, massive, topstepx, or coinbase", *dataProviderFlag)
+		log.Fatalf("unknown data provider %q — use alpaca, massive, topstepx, coinbase, or kalshi", *dataProviderFlag)
 	}
 	bars, err := md.FetchBarsMulti(context.Background(), symbols, *timeframeFlag, from, to)
 	if err != nil {

@@ -78,6 +78,12 @@ func (quoteEvent) isEvent()       {}
 func (marketOpenEvent) isEvent()  {}
 func (marketCloseEvent) isEvent() {}
 
+// pendingStop is a stop or stop-limit order held locally by the engine when
+// the provider doesn't support native stop orders (implements ClientSideStops).
+type pendingStop struct {
+	order strategy.Order
+}
+
 // Engine is the paper trading engine. It streams live data from the provider,
 // calls the strategy on each event, submits returned orders, and processes
 // async fill events — all serialized through a single event loop.
@@ -90,25 +96,59 @@ type Engine struct {
 	config    Config
 	eventCh   chan engineEvent
 	ctx       context.Context // set in Run, used by submitOrders
+
+	// Client-side stop order management for providers that don't support native stops.
+	clientSideStops bool
+	pendingStops    []pendingStop
 }
 
 // NewEngine constructs a paper trading engine. md and exec may be the same
 // object (e.g. *alpaca.Provider) or separate implementations.
 func NewEngine(strat strategy.Strategy, md provider.MarketData, exec provider.Execution, store Store, cfg Config) *Engine {
+	_, clientStops := exec.(provider.ClientSideStops)
 	return &Engine{
-		strategy:  strat,
-		portfolio: portfolio.NewSimulatedPortfolio(cfg.Capital),
-		md:        md,
-		exec:      exec,
-		store:     store,
-		config:    cfg,
-		eventCh:   make(chan engineEvent, 512),
+		strategy:        strat,
+		portfolio:       portfolio.NewSimulatedPortfolio(cfg.Capital),
+		md:              md,
+		exec:            exec,
+		store:           store,
+		config:          cfg,
+		eventCh:         make(chan engineEvent, 512),
+		clientSideStops: clientStops,
 	}
 }
 
 // Run starts the paper trading engine. It blocks until ctx is cancelled.
 func (e *Engine) Run(ctx context.Context, symbols []string) error {
 	e.ctx = ctx
+
+	// Check if the provider supports market discovery (e.g. Kalshi market listing).
+	var discovery strategy.MarketDiscovery
+	if md, ok := e.md.(strategy.MarketDiscovery); ok {
+		discovery = md
+		log.Println("paper engine: provider supports market discovery")
+	}
+
+	// If the strategy implements SymbolResolver, let it discover/choose symbols.
+	// This runs before recovery and OnInit — it determines what we trade.
+	if resolver, ok := e.strategy.(strategy.SymbolResolver); ok {
+		log.Println("paper engine: calling ResolveSymbols...")
+		resolved, err := resolver.ResolveSymbols(strategy.InitContext{
+			Symbols:   symbols,
+			Timeframe: e.config.Timeframe,
+			Config:    e.config.ConfigJSON,
+			Discovery: discovery,
+		})
+		if err != nil {
+			return fmt.Errorf("strategy ResolveSymbols: %w", err)
+		}
+		symbols = mergeUnique(symbols, resolved)
+		log.Printf("paper engine: resolved symbols: %v", symbols)
+	}
+
+	if len(symbols) == 0 {
+		return fmt.Errorf("no symbols to trade — pass --symbols or implement SymbolResolver")
+	}
 
 	// Seed portfolio and warm up strategy indicators from account state + recent history.
 	if err := e.recover(ctx, symbols); err != nil {
@@ -119,9 +159,11 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 	if init, ok := e.strategy.(strategy.Initializer); ok {
 		log.Println("paper engine: calling OnInit...")
 		if err := init.OnInit(strategy.InitContext{
-			Symbols:   symbols,
-			Timeframe: e.config.Timeframe,
-			Config:    e.config.ConfigJSON,
+			Symbols:    symbols,
+			Timeframe:  e.config.Timeframe,
+			Config:     e.config.ConfigJSON,
+			Discovery:  discovery,
+			AddSymbols: e.addSymbols,
 		}); err != nil {
 			return fmt.Errorf("strategy OnInit: %w", err)
 		}
@@ -190,10 +232,13 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 	}
 
 	// If the strategy implements DailySessionHandler, subscribe to market
-	// open/close events. Prefer provider-driven events if available, otherwise
-	// fall back to clock-based scheduling using MarketSchedule config.
+	// open/close events. Skip entirely if the provider declares continuous
+	// trading (e.g. prediction markets, crypto). Otherwise prefer provider-driven
+	// events if available, falling back to clock-based scheduling.
 	if _, ok := e.strategy.(strategy.DailySessionHandler); ok {
-		if sn, ok := e.md.(provider.SessionNotifier); ok {
+		if _, continuous := e.md.(provider.ContinuousMarket); continuous {
+			log.Println("paper engine: provider is a continuous market — session hooks disabled")
+		} else if sn, ok := e.md.(provider.SessionNotifier); ok {
 			go func() {
 				if err := sn.SubscribeSession(ctx, func(ev provider.SessionEvent) {
 					switch ev.Type {
@@ -265,11 +310,13 @@ func (e *Engine) processLoop(ctx context.Context) {
 
 func (e *Engine) onTick(tick strategy.Tick) {
 	e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
+	e.checkStops(tick.Symbol, tick.Close)
 	e.submitOrders(e.strategy.OnTick(tick, e.portfolio))
 }
 
 func (e *Engine) onTrade(trade strategy.Trade) {
 	e.portfolio.UpdateMarketPrice(trade.Symbol, trade.Price)
+	e.checkStops(trade.Symbol, trade.Price)
 	ts := e.strategy.(strategy.TradeSubscriber) // safe: only called when strategy implements it
 	e.submitOrders(ts.OnTrade(trade, e.portfolio))
 }
@@ -376,16 +423,139 @@ func parseHHMM(s string) (int, int) {
 
 func (e *Engine) submitOrders(orders []strategy.Order) {
 	for _, order := range orders {
-		result, err := e.exec.PlaceOrder(e.ctx, order)
-		if err != nil {
-			log.Printf("order error: %v", err)
+		// Intercept stop/stop_limit orders when provider needs client-side management.
+		if e.clientSideStops && (order.OrderType == "stop" || order.OrderType == "stop_limit") {
+			e.pendingStops = append(e.pendingStops, pendingStop{order: order})
+			log.Printf("stop order queued (client-side): %s %s qty=%.2f stop=$%.4f reason=%q",
+				order.Side, order.Symbol, order.Qty, order.StopPrice, order.Reason)
+			if err := e.store.LogOrder(order, "client-side-pending"); err != nil {
+				log.Printf("db: could not log order: %v", err)
+			}
 			continue
 		}
-		log.Printf("order placed: %s %s qty=%.2f reason=%q id=%s",
-			order.Side, order.Symbol, order.Qty, order.Reason, result.ID)
+		e.placeOrder(order)
+	}
+}
 
-		if err := e.store.LogOrder(order, result.ID); err != nil {
-			log.Printf("db: could not log order: %v", err)
+func (e *Engine) placeOrder(order strategy.Order) {
+	result, err := e.exec.PlaceOrder(e.ctx, order)
+	if err != nil {
+		log.Printf("order error: %v", err)
+		return
+	}
+	log.Printf("order placed: %s %s qty=%.2f reason=%q id=%s",
+		order.Side, order.Symbol, order.Qty, order.Reason, result.ID)
+
+	if err := e.store.LogOrder(order, result.ID); err != nil {
+		log.Printf("db: could not log order: %v", err)
+	}
+}
+
+// checkStops evaluates pending client-side stop orders against the current price.
+// Sell stops trigger when price drops to or below the stop price.
+// Buy stops trigger when price rises to or above the stop price.
+func (e *Engine) checkStops(symbol string, price float64) {
+	if len(e.pendingStops) == 0 {
+		return
+	}
+
+	remaining := e.pendingStops[:0] // reuse backing array
+	for _, ps := range e.pendingStops {
+		if ps.order.Symbol != symbol {
+			remaining = append(remaining, ps)
+			continue
+		}
+
+		triggered := false
+		if ps.order.Side == "sell" && price <= ps.order.StopPrice {
+			triggered = true
+		} else if ps.order.Side == "buy" && price >= ps.order.StopPrice {
+			triggered = true
+		}
+
+		if !triggered {
+			remaining = append(remaining, ps)
+			continue
+		}
+
+		// Convert to market or limit order and submit.
+		submit := ps.order
+		if submit.OrderType == "stop" {
+			submit.OrderType = "market"
+		} else { // stop_limit
+			submit.OrderType = "limit"
+		}
+		submit.StopPrice = 0
+		submit.Reason = fmt.Sprintf("stop triggered @ $%.4f: %s", price, ps.order.Reason)
+
+		log.Printf("stop triggered: %s %s stop=$%.4f price=$%.4f",
+			ps.order.Side, ps.order.Symbol, ps.order.StopPrice, price)
+		e.placeOrder(submit)
+	}
+	e.pendingStops = remaining
+}
+
+// addSymbols dynamically subscribes to new symbols mid-run. Each call
+// launches independent subscription goroutines that feed events into the
+// existing event channel — no provider interface changes needed.
+func (e *Engine) addSymbols(symbols ...string) {
+	log.Printf("paper engine: dynamically adding symbols %v", symbols)
+
+	// Subscribe to bars for new symbols.
+	go func() {
+		if err := e.md.SubscribeBars(e.ctx, symbols, e.config.Timeframe, func(b provider.Bar) {
+			e.send(e.ctx, tickEvent{tick: provider.BarToTick(b)})
+		}); err != nil && e.ctx.Err() == nil {
+			log.Printf("paper engine: dynamic bar subscription error for %v: %v", symbols, err)
+		}
+	}()
+
+	// Mirror trade subscriptions if strategy uses them.
+	if _, ok := e.strategy.(strategy.TradeSubscriber); ok {
+		go func() {
+			if err := e.md.SubscribeTrades(e.ctx, symbols, func(t provider.Trade) {
+				e.send(e.ctx, tradeEvent{trade: strategy.Trade{
+					Symbol:    t.Symbol,
+					Timestamp: t.Timestamp,
+					Price:     t.Price,
+					Size:      uint32(t.Size),
+				}})
+			}); err != nil && e.ctx.Err() == nil {
+				log.Printf("paper engine: dynamic trade subscription error for %v: %v", symbols, err)
+			}
+		}()
+	}
+
+	// Mirror quote subscriptions if strategy uses them.
+	if _, ok := e.strategy.(strategy.QuoteSubscriber); ok {
+		go func() {
+			if err := e.md.SubscribeQuotes(e.ctx, symbols, func(q provider.Quote) {
+				e.send(e.ctx, quoteEvent{quote: strategy.Quote{
+					Symbol:    q.Symbol,
+					Timestamp: q.Timestamp,
+					BidPrice:  q.BidPrice,
+					BidSize:   q.BidSize,
+					AskPrice:  q.AskPrice,
+					AskSize:   q.AskSize,
+				}})
+			}); err != nil && e.ctx.Err() == nil {
+				log.Printf("paper engine: dynamic quote subscription error for %v: %v", symbols, err)
+			}
+		}()
+	}
+}
+
+// mergeUnique appends b items to a, skipping duplicates already in a.
+func mergeUnique(a, b []string) []string {
+	seen := make(map[string]bool, len(a))
+	for _, s := range a {
+		seen[s] = true
+	}
+	for _, s := range b {
+		if !seen[s] {
+			a = append(a, s)
+			seen[s] = true
 		}
 	}
+	return a
 }

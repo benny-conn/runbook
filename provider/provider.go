@@ -126,6 +126,22 @@ type SessionNotifier interface {
 	SubscribeSession(ctx context.Context, handler func(SessionEvent)) error
 }
 
+// ContinuousMarket is an optional marker interface a provider can implement
+// to indicate it trades 24/7 with no discrete market sessions (e.g. prediction
+// markets, crypto). When implemented, the engine skips DailySessionHandler
+// hooks entirely — even if the strategy implements them.
+type ContinuousMarket interface {
+	ContinuousMarket()
+}
+
+// ClientSideStops is an optional marker interface a provider can implement
+// to indicate it doesn't support native stop or stop-limit orders. When
+// implemented, the engine intercepts stop/stop_limit orders and manages
+// them locally, triggering them based on incoming price data.
+type ClientSideStops interface {
+	ClientSideStops()
+}
+
 // BarToTick converts a provider Bar to a strategy Tick.
 func BarToTick(b Bar) strategy.Tick {
 	return strategy.Tick{
