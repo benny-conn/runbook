@@ -26,6 +26,8 @@ const (
 	maxResponseBytes = 1024 * 1024 // 1MB
 )
 
+const maxRuntimeErrors = 10
+
 // ScriptStrategy implements strategy.Strategy via a Goja JS runtime.
 type ScriptStrategy struct {
 	mu            sync.Mutex
@@ -38,6 +40,8 @@ type ScriptStrategy struct {
 	onMarketClose goja.Callable
 	onExit        goja.Callable
 	name          string
+	runtimeErrors []string
+	errorSeen     map[string]bool
 }
 
 // New creates a ScriptStrategy by compiling src in a Goja runtime.
@@ -183,11 +187,30 @@ func New(name, src string, config map[string]string) (*ScriptStrategy, error) {
 		onMarketClose: extractOptional("onMarketClose"),
 		onExit:        extractOptional("onExit"),
 		name:          name,
+		errorSeen:     make(map[string]bool),
 	}, nil
 }
 
 // Name implements strategy.Strategy.
 func (s *ScriptStrategy) Name() string { return s.name }
+
+// RuntimeErrors returns the deduplicated runtime errors collected so far.
+func (s *ScriptStrategy) RuntimeErrors() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.runtimeErrors))
+	copy(out, s.runtimeErrors)
+	return out
+}
+
+// trackError records a unique error string (caller must hold s.mu).
+func (s *ScriptStrategy) trackError(msg string) {
+	if s.errorSeen[msg] || len(s.runtimeErrors) >= maxRuntimeErrors {
+		return
+	}
+	s.errorSeen[msg] = true
+	s.runtimeErrors = append(s.runtimeErrors, msg)
+}
 
 // ---------------------------------------------------------------------------
 // strategy.Strategy (required)
@@ -212,7 +235,9 @@ func (s *ScriptStrategy) OnTick(tick strategy.Tick, portfolio strategy.Portfolio
 
 	result, err := s.onTick(goja.Undefined(), tickVal, portfolioVal)
 	if err != nil {
-		fmt.Printf("script onTick error: %v\n", err)
+		msg := fmt.Sprintf("script onTick error: %v", err)
+		fmt.Println(msg)
+		s.trackError(msg)
 		return nil
 	}
 
@@ -260,7 +285,9 @@ func (s *ScriptStrategy) OnTrade(trade strategy.Trade, portfolio strategy.Portfo
 
 	result, err := s.onTrade(goja.Undefined(), tradeVal, portfolioVal)
 	if err != nil {
-		fmt.Printf("script onTrade error: %v\n", err)
+		msg := fmt.Sprintf("script onTrade error: %v", err)
+		fmt.Println(msg)
+		s.trackError(msg)
 		return nil
 	}
 
@@ -312,7 +339,9 @@ func (s *ScriptStrategy) OnMarketOpen(portfolio strategy.Portfolio) []strategy.O
 
 	result, err := s.onMarketOpen(goja.Undefined(), portfolioVal)
 	if err != nil {
-		fmt.Printf("script onMarketOpen error: %v\n", err)
+		msg := fmt.Sprintf("script onMarketOpen error: %v", err)
+		fmt.Println(msg)
+		s.trackError(msg)
 		return nil
 	}
 
@@ -331,7 +360,9 @@ func (s *ScriptStrategy) OnMarketClose(portfolio strategy.Portfolio) []strategy.
 
 	result, err := s.onMarketClose(goja.Undefined(), portfolioVal)
 	if err != nil {
-		fmt.Printf("script onMarketClose error: %v\n", err)
+		msg := fmt.Sprintf("script onMarketClose error: %v", err)
+		fmt.Println(msg)
+		s.trackError(msg)
 		return nil
 	}
 
