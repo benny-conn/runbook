@@ -339,11 +339,15 @@ func (e *Engine) onMarketClose() {
 }
 
 func (e *Engine) onFill(fill strategy.Fill) {
+	// Compute per-fill realized P&L and classify side BEFORE applying.
+	fill.RealizedPL = e.portfolio.ComputeFillPL(fill)
+	fill.Side = e.portfolio.ClassifyFillSide(fill)
+
 	e.portfolio.ApplyFill(fill)
 	e.portfolio.UpdateMarketPrice(fill.Symbol, fill.Price)
 	e.strategy.OnFill(fill)
 
-	log.Printf("fill: %s %s qty=%.2f @ $%.2f", fill.Side, fill.Symbol, fill.Qty, fill.Price)
+	log.Printf("fill: %s %s qty=%.2f @ $%.2f pl=%.4f", fill.Side, fill.Symbol, fill.Qty, fill.Price, fill.RealizedPL)
 
 	if err := e.store.LogFill(fill); err != nil {
 		log.Printf("db: could not log fill: %v", err)

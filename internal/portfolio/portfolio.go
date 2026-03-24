@@ -9,9 +9,10 @@ import (
 // SimulatedPortfolio tracks cash, positions, and P&L for backtesting.
 // It is safe for concurrent use.
 type SimulatedPortfolio struct {
-	mu        sync.RWMutex
-	cash      float64
-	positions map[string]*strategy.Position
+	mu         sync.RWMutex
+	cash       float64
+	realizedPL float64
+	positions  map[string]*strategy.Position
 }
 
 func NewSimulatedPortfolio(initialCash float64) *SimulatedPortfolio {
@@ -62,11 +63,66 @@ func (p *SimulatedPortfolio) Positions() []strategy.Position {
 func (p *SimulatedPortfolio) TotalPL() float64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	var total float64
+	total := p.realizedPL
 	for _, pos := range p.positions {
 		total += pos.UnrealizedPL
 	}
 	return total
+}
+
+// ComputeFillPL returns the realized P&L for a fill based on the current position.
+// Must be called BEFORE ApplyFill so the position state is still intact.
+func (p *SimulatedPortfolio) ComputeFillPL(fill strategy.Fill) float64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	pos, exists := p.positions[fill.Symbol]
+	if !exists {
+		return 0 // opening a new position — no realized P&L
+	}
+
+	switch fill.Side {
+	case "sell":
+		if pos.Qty > 0 {
+			// Closing (or reducing) a long position.
+			closedQty := fill.Qty
+			if closedQty > pos.Qty {
+				closedQty = pos.Qty // only the portion that closes the long
+			}
+			return (fill.Price - pos.AvgCost) * closedQty
+		}
+	case "buy":
+		if pos.Qty < 0 {
+			// Covering (or reducing) a short position.
+			closedQty := fill.Qty
+			if closedQty > -pos.Qty {
+				closedQty = -pos.Qty // only the portion that covers the short
+			}
+			return (pos.AvgCost - fill.Price) * closedQty
+		}
+	}
+	return 0
+}
+
+// ClassifyFillSide returns the effective side for a fill: "buy", "sell", or "short".
+// "short" indicates the sell is opening a new short rather than closing a long.
+// Must be called BEFORE ApplyFill.
+func (p *SimulatedPortfolio) ClassifyFillSide(fill strategy.Fill) string {
+	if fill.Side != "sell" {
+		return fill.Side
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	pos, exists := p.positions[fill.Symbol]
+	if !exists || pos.Qty <= 0 {
+		return "short" // no long position — this sell opens a short
+	}
+	if fill.Qty > pos.Qty {
+		// Partially closes long, partially opens short — call it "sell" for now;
+		// the closing portion is captured in ComputeFillPL.
+		return "sell"
+	}
+	return "sell"
 }
 
 // ApplyFill updates cash and positions based on a completed fill.
@@ -85,7 +141,13 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 				AvgCost: fill.Price,
 			}
 		} else if pos.Qty < 0 {
-			// Covering a short position.
+			// Covering a short position — realize P&L on the covered portion.
+			coveredQty := fill.Qty
+			if coveredQty > -pos.Qty {
+				coveredQty = -pos.Qty
+			}
+			p.realizedPL += (pos.AvgCost - fill.Price) * coveredQty
+
 			pos.Qty += fill.Qty
 			if pos.Qty == 0 {
 				delete(p.positions, fill.Symbol)
@@ -99,7 +161,7 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 			pos.Qty += fill.Qty
 			pos.AvgCost = totalCost / pos.Qty
 		}
-	case "sell":
+	case "sell", "short":
 		pos, exists := p.positions[fill.Symbol]
 		if !exists {
 			// Opening a new short position (negative qty).
@@ -112,6 +174,14 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 			return
 		}
 		wasLong := pos.Qty > 0
+		if wasLong {
+			// Closing (or reducing) a long position — realize P&L on the closed portion.
+			closedQty := fill.Qty
+			if closedQty > pos.Qty {
+				closedQty = pos.Qty
+			}
+			p.realizedPL += (fill.Price - pos.AvgCost) * closedQty
+		}
 		p.cash += fill.Qty * fill.Price
 		pos.Qty -= fill.Qty
 		if pos.Qty == 0 {

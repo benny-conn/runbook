@@ -31,11 +31,12 @@ type Order struct {
 
 // Fill is the result of an executed order.
 type Fill struct {
-	Symbol    string
-	Side      string
-	Qty       float64
-	Price     float64
-	Timestamp time.Time
+	Symbol     string
+	Side       string  // "buy", "sell", or "short" (opening a new short)
+	Qty        float64
+	Price      float64
+	Timestamp  time.Time
+	RealizedPL float64 // per-fill realized P&L (set by engine before logging)
 }
 
 // Position represents an open holding in the portfolio.
