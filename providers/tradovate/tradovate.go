@@ -86,6 +86,12 @@ func New(cfg Config) *Provider {
 		cid:        envOr(cfg.CID, "TRADOVATE_CID"),
 		sec:        envOr(cfg.Sec, "TRADOVATE_SEC"),
 	}
+	if creds.username == "" {
+		log.Println("WARNING: tradovate: username not set (set TRADOVATE_USERNAME or config username)")
+	}
+	if creds.password == "" {
+		log.Println("WARNING: tradovate: password not set (set TRADOVATE_PASSWORD or config password)")
+	}
 	return &Provider{
 		auth:     newAuthClient(demo, creds),
 		apiWS:    apiWS,

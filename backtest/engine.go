@@ -3,6 +3,7 @@ package backtest
 import (
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/benny-conn/brandon-bot/engine"
@@ -390,6 +391,15 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		if hasMTF {
 			for _, agg := range aggregators {
 				agg.Update(tick)
+			}
+			// Sort completed bars by timeframe duration (shortest first) so strategies
+			// always see 5m before 1h, matching the live engine's behavior.
+			if len(completedBars) > 1 {
+				sort.Slice(completedBars, func(a, b int) bool {
+					da, _ := engine.ParseTimeframe(completedBars[a].timeframe)
+					db, _ := engine.ParseTimeframe(completedBars[b].timeframe)
+					return da < db
+				})
 			}
 			for _, cb := range completedBars {
 				barOrders := e.strategy.OnBar(cb.timeframe, cb.tick, e.portfolio)

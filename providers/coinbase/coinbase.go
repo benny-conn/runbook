@@ -59,6 +59,12 @@ type Provider struct {
 func New(cfg Config) *Provider {
 	accessKey := envOr(cfg.AccessKey, "COINBASE_ACCESS_KEY")
 	pemKey := envOr(cfg.PrivatePemKey, "COINBASE_PRIVATE_PEM_KEY")
+	if accessKey == "" {
+		log.Println("WARNING: coinbase: access key not set (set COINBASE_ACCESS_KEY or config access_key)")
+	}
+	if pemKey == "" {
+		log.Println("WARNING: coinbase: private PEM key not set (set COINBASE_PRIVATE_PEM_KEY or config private_pem_key)")
+	}
 
 	creds := &credentials.Credentials{
 		AccessKey:     accessKey,

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -143,7 +144,12 @@ func (a *authClient) startRenewal(ctx context.Context) {
 				return
 			case <-t.C:
 				if err := a.renew(); err != nil {
-					_ = a.authenticate() // fall back to full re-auth
+					log.Printf("tradovate: token renewal failed: %v — falling back to full re-auth", err)
+					if authErr := a.authenticate(); authErr != nil {
+						log.Printf("tradovate: re-authentication also failed: %v — next API call may fail", authErr)
+					} else {
+						log.Println("tradovate: re-authentication successful")
+					}
 				}
 			}
 		}

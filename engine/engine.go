@@ -47,6 +47,20 @@ type Config struct {
 	WarmupFrom     time.Time       // if set, warm up from this time (e.g. strategy creation date); 0 = use WarmupBars only
 	ConfigJSON     []byte          // raw JSON config passed to Initializer.OnInit (nil if none)
 	MarketSchedule *MarketSchedule // market hours for DailySessionHandler; nil defaults to NYSE
+
+	// Positions overrides the broker's GetPositions() response during recovery.
+	// When set (non-nil, even if empty), the engine uses these positions instead
+	// of querying the broker. This allows the backend to supply per-strategy
+	// position state so each strategy resumes exactly where it left off — even
+	// when multiple strategies share the same broker account.
+	//
+	// The Cash field is still read from the broker (GetAccount) unless
+	// CashOverride is set.
+	Positions []provider.Position
+
+	// CashOverride, when > 0, overrides the broker's GetAccount().Cash during
+	// recovery. Use together with Positions for fully backend-controlled recovery.
+	CashOverride float64
 }
 
 func DefaultConfig(capital float64) Config {

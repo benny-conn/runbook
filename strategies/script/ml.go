@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"sort"
+	"time"
 
 	"github.com/dop251/goja"
 )
@@ -145,6 +146,8 @@ func registerML(vm *goja.Runtime) {
 	// -----------------------------------------------------------------------
 
 	// ml.randomForest(features, labels, opts?) → model
+	// opts.seed (default 42): random seed for bootstrap sampling. Use different
+	// seeds to explore randomness across backtests. Set to 0 for time-based seed.
 	ml.Set("randomForest", func(call goja.FunctionCall) goja.Value {
 		features := toFloat64Matrix(call.Argument(0).Export())
 		labels := toFloat64Slice(call.Argument(1).Export())
@@ -152,6 +155,7 @@ func registerML(vm *goja.Runtime) {
 		nTrees := intOpt(opts, "nTrees", 50)
 		maxDepth := intOpt(opts, "maxDepth", 5)
 		minSamples := intOpt(opts, "minSamples", 10)
+		seed := int64(intOpt(opts, "seed", 42))
 
 		n := minLen(len(features), len(labels))
 		if n < 2 {
@@ -163,7 +167,10 @@ func registerML(vm *goja.Runtime) {
 		features = features[:n]
 		labels = labels[:n]
 
-		rng := rand.New(rand.NewSource(42))
+		if seed == 0 {
+			seed = time.Now().UnixNano()
+		}
+		rng := rand.New(rand.NewSource(seed))
 		trees := make([]*treeNode, nTrees)
 		for t := 0; t < nTrees; t++ {
 			// Bootstrap sample
@@ -271,8 +278,12 @@ func registerML(vm *goja.Runtime) {
 		}
 		dim := len(features[0])
 
-		// Initialize centers with first k distinct points (deterministic)
-		rng := rand.New(rand.NewSource(42))
+		// Initialize centers with first k distinct points (deterministic by default).
+		seed := int64(intOpt(opts, "seed", 42))
+		if seed == 0 {
+			seed = time.Now().UnixNano()
+		}
+		rng := rand.New(rand.NewSource(seed))
 		perm := rng.Perm(n)
 		centers := make([][]float64, k)
 		for i := 0; i < k; i++ {

@@ -5,6 +5,7 @@ package alpaca
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"sort"
 	"strings"
@@ -52,6 +53,12 @@ func New(cfg Config) *Provider {
 	feed := envOr(cfg.Feed, "")
 	if feed == "" {
 		feed = "iex"
+	}
+	if apiKey == "" {
+		log.Println("WARNING: alpaca: API key not set (set ALPACA_API_KEY or config api_key)")
+	}
+	if secret == "" {
+		log.Println("WARNING: alpaca: API secret not set (set ALPACA_SECRET or config secret)")
 	}
 	return &Provider{
 		trading: alp.NewClient(alp.ClientOpts{

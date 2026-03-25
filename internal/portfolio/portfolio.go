@@ -13,6 +13,12 @@ import (
 // are treated as futures: P&L is scaled by the multiplier, and cash only changes
 // by realized P&L (no notional value exchange). Symbols without a multiplier
 // (or multiplier == 1) behave as equities.
+//
+// NOTE: All financial values use float64 arithmetic. For typical trading
+// scenarios (sub-million dollar accounts, standard lot sizes) this provides
+// ~15 digits of precision which is more than sufficient. Rounding errors
+// may accumulate over thousands of high-frequency fills but remain negligible
+// for practical purposes.
 type SimulatedPortfolio struct {
 	mu          sync.RWMutex
 	cash        float64

@@ -27,18 +27,35 @@ type PositionSeeder interface {
 func (e *Engine) recover(ctx context.Context, symbols []string) error {
 	log.Println("recovery: fetching account state...")
 
-	account, err := e.exec.GetAccount(ctx)
-	if err != nil {
-		return fmt.Errorf("getting account: %w", err)
+	// Determine cash: use override if set, otherwise query broker.
+	var cash float64
+	if e.config.CashOverride > 0 {
+		cash = e.config.CashOverride
+		log.Printf("recovery: using cash override $%.2f", cash)
+	} else {
+		account, err := e.exec.GetAccount(ctx)
+		if err != nil {
+			return fmt.Errorf("getting account: %w", err)
+		}
+		cash = account.Cash
 	}
 
-	positions, err := e.exec.GetPositions(ctx)
-	if err != nil {
-		return fmt.Errorf("getting positions: %w", err)
+	// Determine positions: use override if set, otherwise query broker.
+	// A non-nil Positions slice (even if empty) means "use this instead of broker".
+	var positions []provider.Position
+	if e.config.Positions != nil {
+		positions = e.config.Positions
+		log.Printf("recovery: using %d backend-supplied positions (bypassing broker)", len(positions))
+	} else {
+		var err error
+		positions, err = e.exec.GetPositions(ctx)
+		if err != nil {
+			return fmt.Errorf("getting positions: %w", err)
+		}
 	}
 
-	// Seed portfolio with real cash balance.
-	e.portfolio = portfolio.NewSimulatedPortfolio(account.Cash)
+	// Seed portfolio with cash balance.
+	e.portfolio = portfolio.NewSimulatedPortfolio(cash)
 
 	// Apply any existing open positions.
 	seedPositions(e.portfolio, positions)
@@ -126,9 +143,9 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 
 	e.warmingUp = false
 
-	// Reset portfolio to the real broker state after warmup replay.
+	// Reset portfolio to the real broker/backend state after warmup replay.
 	// Simulated fills shifted balances/positions — restore truth before going live.
-	e.portfolio = portfolio.NewSimulatedPortfolio(account.Cash)
+	e.portfolio = portfolio.NewSimulatedPortfolio(cash)
 	seedPositions(e.portfolio, positions)
 
 	// If the strategy supports position injection, tell it what we currently hold.
@@ -171,6 +188,11 @@ func seedPositions(port *portfolio.SimulatedPortfolio, positions []provider.Posi
 // stateful strategies (like the script ORB) transition correctly through
 // their lifecycle. Non-market orders are ignored — limit/stop fills can't
 // be reliably simulated from bar data alone.
+//
+// LIMITATION: Strategies that rely on limit orders for entries will not have
+// those fills replicated during warmup. This means indicator state and position
+// tracking may be slightly incorrect after recovery. For best results, use
+// market orders for entries or implement PositionSeeder to reconcile state.
 func simulateFills(strat strategy.Strategy, port *portfolio.SimulatedPortfolio, orders []strategy.Order, tick strategy.Tick) {
 	for _, o := range orders {
 		if o.OrderType != "market" && o.OrderType != "" {
