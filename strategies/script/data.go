@@ -23,6 +23,40 @@ type scriptOptions struct {
 	marketData provider.MarketData
 	capital    float64
 	hasCapital bool
+	logSink   *LogSink
+}
+
+// LogSink captures console.log output from JS scripts during backtesting.
+type LogSink struct {
+	mu   sync.Mutex
+	logs []string
+}
+
+const (
+	maxLogEntries   = 50
+	maxLogEntrySize = 500
+)
+
+// Add appends a log entry, truncating if necessary.
+func (ls *LogSink) Add(msg string) {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if len(ls.logs) >= maxLogEntries {
+		return
+	}
+	if len(msg) > maxLogEntrySize {
+		msg = msg[:maxLogEntrySize] + "..."
+	}
+	ls.logs = append(ls.logs, msg)
+}
+
+// Logs returns a copy of all captured log entries.
+func (ls *LogSink) Logs() []string {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	out := make([]string, len(ls.logs))
+	copy(out, ls.logs)
+	return out
 }
 
 // WithMarketData injects a MarketData provider, enabling the `data` global.
@@ -37,6 +71,13 @@ func WithCapital(c float64) Option {
 	return func(o *scriptOptions) {
 		o.capital = c
 		o.hasCapital = true
+	}
+}
+
+// WithLogSink captures console.log output into the provided sink instead of stdout.
+func WithLogSink(sink *LogSink) Option {
+	return func(o *scriptOptions) {
+		o.logSink = sink
 	}
 }
 

@@ -16,6 +16,28 @@ type Trade struct {
 	RealizedPL float64 // non-zero only for sell fills
 }
 
+// Diagnostics tracks internal engine metrics for debugging zero-trade backtests.
+type Diagnostics struct {
+	BarsProcessed    int      `json:"barsProcessed"`
+	OrdersRejected   int      `json:"ordersRejected"`
+	RejectionReasons []string `json:"rejectionReasons,omitempty"`
+	reasonSeen       map[string]bool
+}
+
+const maxRejectionReasons = 10
+
+func (d *Diagnostics) trackRejection(reason string) {
+	d.OrdersRejected++
+	if d.reasonSeen == nil {
+		d.reasonSeen = make(map[string]bool)
+	}
+	if d.reasonSeen[reason] || len(d.RejectionReasons) >= maxRejectionReasons {
+		return
+	}
+	d.reasonSeen[reason] = true
+	d.RejectionReasons = append(d.RejectionReasons, reason)
+}
+
 // Results holds the output of a completed backtest run.
 type Results struct {
 	InitialCapital float64
@@ -27,6 +49,7 @@ type Results struct {
 	WinningTrades  int
 	LosingTrades   int
 	Trades         []Trade
+	Diagnostics    Diagnostics
 }
 
 func (r *Results) Print() {
@@ -57,8 +80,9 @@ func (r *Results) Print() {
 
 // Engine runs a strategy against a sorted slice of historical ticks.
 type Engine struct {
-	strategy  strategy.Strategy
-	portfolio *portfolio.SimulatedPortfolio
+	strategy    strategy.Strategy
+	portfolio   *portfolio.SimulatedPortfolio
+	diagnostics Diagnostics
 }
 
 func NewEngine(strat strategy.Strategy, initialCapital float64) *Engine {
@@ -76,7 +100,8 @@ func (e *Engine) fillOrders(orders []strategy.Order, symbolPrices map[string]flo
 	for _, order := range orders {
 		fillPrice, ok := symbolPrices[order.Symbol]
 		if !ok || fillPrice <= 0 {
-			continue // no price data for this symbol at this point
+			e.diagnostics.trackRejection(fmt.Sprintf("%s: no price data available", order.Symbol))
+			continue
 		}
 
 		var realizedPL float64
@@ -93,6 +118,7 @@ func (e *Engine) fillOrders(orders []strategy.Order, symbolPrices map[string]flo
 			} else {
 				cost := fillQty * fillPrice
 				if cost > e.portfolio.Cash() {
+					e.diagnostics.trackRejection(fmt.Sprintf("%s buy: cost $%.2f exceeds cash $%.2f", order.Symbol, cost, e.portfolio.Cash()))
 					continue
 				}
 			}
@@ -337,6 +363,8 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		}
 	}
 
+	e.diagnostics.BarsProcessed = len(ticks)
+
 	return &Results{
 		InitialCapital: initialCapital,
 		FinalEquity:    finalEquity,
@@ -347,6 +375,7 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		WinningTrades:  wins,
 		LosingTrades:   losses,
 		Trades:         trades,
+		Diagnostics:    e.diagnostics,
 	}
 }
 

@@ -73,7 +73,12 @@ func New(name, src string, config map[string]string, opts ...Option) (*ScriptStr
 		for i, arg := range call.Arguments {
 			args[i] = arg.Export()
 		}
-		fmt.Println(args...)
+		msg := fmt.Sprint(args...)
+		if options.logSink != nil {
+			options.logSink.Add(msg)
+		} else {
+			fmt.Println(msg)
+		}
 		return goja.Undefined()
 	})
 	vm.Set("console", console)
