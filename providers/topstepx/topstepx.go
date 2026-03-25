@@ -256,6 +256,24 @@ func (p *Provider) resolveContract(ctx context.Context, symbol string) (*contrac
 	return c, nil
 }
 
+// GetContractSpec implements provider.ContractSpecProvider.
+func (p *Provider) GetContractSpec(ctx context.Context, symbol string) (provider.ContractSpec, error) {
+	c, err := p.resolveContract(ctx, symbol)
+	if err != nil {
+		return provider.ContractSpec{}, err
+	}
+	pointValue := 1.0
+	if c.TickSize > 0 {
+		pointValue = c.TickValue / c.TickSize
+	}
+	return provider.ContractSpec{
+		Symbol:     symbol,
+		TickSize:   c.TickSize,
+		TickValue:  c.TickValue,
+		PointValue: pointValue,
+	}, nil
+}
+
 // symbolFromContractID returns the cached symbol for a contract ID string.
 func (p *Provider) symbolFromContractID(id string) string {
 	p.contractMu.RLock()

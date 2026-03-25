@@ -750,6 +750,64 @@ func (p *Provider) GetOpenOrders(ctx context.Context) ([]provider.OpenOrder, err
 	return orders, nil
 }
 
+// GetContractSpec implements provider.ContractSpecProvider.
+// It queries the Tradovate contract/find endpoint to get tick size and value.
+func (p *Provider) GetContractSpec(ctx context.Context, symbol string) (provider.ContractSpec, error) {
+	if err := p.ensureConnected(ctx); err != nil {
+		return provider.ContractSpec{}, err
+	}
+	accessToken, _ := p.auth.tokens()
+	conn, err := dialTradovate(ctx, p.apiWS, accessToken)
+	if err != nil {
+		return provider.ContractSpec{}, fmt.Errorf("tradovate ws for contract spec: %w", err)
+	}
+	defer conn.Close()
+
+	var contract struct {
+		ID               int64   `json:"id"`
+		Name             string  `json:"name"`
+		ContractMaturity int64   `json:"contractMaturityId"`
+		ProviderTickSize float64 `json:"providerTickSize"`
+	}
+	if err := conn.Request(ctx, fmt.Sprintf("contract/find?name=%s", symbol), nil, &contract); err != nil {
+		return provider.ContractSpec{}, fmt.Errorf("tradovate contract/find %s: %w", symbol, err)
+	}
+	p.cacheContract(contract.ID, symbol)
+
+	// Look up the product to get BigPointValue (point value per full point move).
+	var maturity struct {
+		ProductID int64 `json:"productId"`
+	}
+	if err := conn.Request(ctx, fmt.Sprintf("contractMaturity/item?id=%d", contract.ContractMaturity), nil, &maturity); err != nil {
+		return provider.ContractSpec{}, fmt.Errorf("tradovate contractMaturity lookup: %w", err)
+	}
+
+	var product struct {
+		TickSize      float64 `json:"tickSize"`
+		ValuePerPoint float64 `json:"valuePerPoint"`
+	}
+	if err := conn.Request(ctx, fmt.Sprintf("product/item?id=%d", maturity.ProductID), nil, &product); err != nil {
+		return provider.ContractSpec{}, fmt.Errorf("tradovate product lookup: %w", err)
+	}
+
+	tickSize := product.TickSize
+	if tickSize == 0 && contract.ProviderTickSize > 0 {
+		tickSize = contract.ProviderTickSize
+	}
+	pointValue := product.ValuePerPoint
+	tickValue := 0.0
+	if tickSize > 0 && pointValue > 0 {
+		tickValue = pointValue * tickSize
+	}
+
+	return provider.ContractSpec{
+		Symbol:     symbol,
+		TickSize:   tickSize,
+		TickValue:  tickValue,
+		PointValue: pointValue,
+	}, nil
+}
+
 // — contract cache helpers —
 
 func (p *Provider) cacheContract(id int64, sym string) {

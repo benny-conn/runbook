@@ -8,11 +8,17 @@ import (
 
 // SimulatedPortfolio tracks cash, positions, and P&L for backtesting.
 // It is safe for concurrent use.
+//
+// When multipliers are set (via SetMultipliers), symbols with a multiplier > 1
+// are treated as futures: P&L is scaled by the multiplier, and cash only changes
+// by realized P&L (no notional value exchange). Symbols without a multiplier
+// (or multiplier == 1) behave as equities.
 type SimulatedPortfolio struct {
-	mu         sync.RWMutex
-	cash       float64
-	realizedPL float64
-	positions  map[string]*strategy.Position
+	mu          sync.RWMutex
+	cash        float64
+	realizedPL  float64
+	positions   map[string]*strategy.Position
+	multipliers map[string]float64 // symbol → point value (1.0 for equities)
 }
 
 func NewSimulatedPortfolio(initialCash float64) *SimulatedPortfolio {
@@ -20,6 +26,32 @@ func NewSimulatedPortfolio(initialCash float64) *SimulatedPortfolio {
 		cash:      initialCash,
 		positions: make(map[string]*strategy.Position),
 	}
+}
+
+// SetMultipliers configures per-symbol contract multipliers for futures P&L.
+// For equities, multiplier is 1.0 (default when absent).
+// For MNQ it's 2.0, ES is 50.0, MES is 5.0, etc.
+func (p *SimulatedPortfolio) SetMultipliers(m map[string]float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.multipliers = m
+}
+
+// multiplier returns the point value multiplier for a symbol.
+// Returns 1.0 if no multiplier is set (equity behavior).
+func (p *SimulatedPortfolio) multiplier(symbol string) float64 {
+	if p.multipliers == nil {
+		return 1.0
+	}
+	if m, ok := p.multipliers[symbol]; ok && m > 0 {
+		return m
+	}
+	return 1.0
+}
+
+// isFutures returns true if the symbol has a multiplier > 1 (futures behavior).
+func (p *SimulatedPortfolio) isFutures(symbol string) bool {
+	return p.multiplier(symbol) > 1.0
 }
 
 func (p *SimulatedPortfolio) Cash() float64 {
@@ -33,7 +65,12 @@ func (p *SimulatedPortfolio) Equity() float64 {
 	defer p.mu.RUnlock()
 	total := p.cash
 	for _, pos := range p.positions {
-		total += pos.MarketValue
+		if p.isFutures(pos.Symbol) {
+			// For futures, equity contribution is unrealized P&L (not notional value).
+			total += pos.UnrealizedPL
+		} else {
+			total += pos.MarketValue
+		}
 	}
 	return total
 }
@@ -81,6 +118,8 @@ func (p *SimulatedPortfolio) ComputeFillPL(fill strategy.Fill) float64 {
 		return 0 // opening a new position — no realized P&L
 	}
 
+	mult := p.multiplier(fill.Symbol)
+
 	switch fill.Side {
 	case "sell":
 		if pos.Qty > 0 {
@@ -89,7 +128,7 @@ func (p *SimulatedPortfolio) ComputeFillPL(fill strategy.Fill) float64 {
 			if closedQty > pos.Qty {
 				closedQty = pos.Qty // only the portion that closes the long
 			}
-			return (fill.Price - pos.AvgCost) * closedQty
+			return (fill.Price - pos.AvgCost) * closedQty * mult
 		}
 	case "buy":
 		if pos.Qty < 0 {
@@ -98,7 +137,7 @@ func (p *SimulatedPortfolio) ComputeFillPL(fill strategy.Fill) float64 {
 			if closedQty > -pos.Qty {
 				closedQty = -pos.Qty // only the portion that covers the short
 			}
-			return (pos.AvgCost - fill.Price) * closedQty
+			return (pos.AvgCost - fill.Price) * closedQty * mult
 		}
 	}
 	return 0
@@ -126,13 +165,20 @@ func (p *SimulatedPortfolio) ClassifyFillSide(fill strategy.Fill) string {
 }
 
 // ApplyFill updates cash and positions based on a completed fill.
+// For futures (multiplier > 1), cash only changes by realized P&L — no notional
+// value is exchanged. For equities (multiplier == 1), cash changes by qty × price.
 func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	mult := p.multiplier(fill.Symbol)
+	futures := mult > 1.0
+
 	switch fill.Side {
 	case "buy":
-		p.cash -= fill.Qty * fill.Price
+		if !futures {
+			p.cash -= fill.Qty * fill.Price
+		}
 		pos, exists := p.positions[fill.Symbol]
 		if !exists {
 			p.positions[fill.Symbol] = &strategy.Position{
@@ -146,7 +192,11 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 			if coveredQty > -pos.Qty {
 				coveredQty = -pos.Qty
 			}
-			p.realizedPL += (pos.AvgCost - fill.Price) * coveredQty
+			realizedPL := (pos.AvgCost - fill.Price) * coveredQty * mult
+			p.realizedPL += realizedPL
+			if futures {
+				p.cash += realizedPL
+			}
 
 			pos.Qty += fill.Qty
 			if pos.Qty == 0 {
@@ -154,6 +204,9 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 			} else if pos.Qty > 0 {
 				// Buy exceeded short qty — flipped to long. Reset avg cost.
 				pos.AvgCost = fill.Price
+				if !futures {
+					// For equities, the excess buy cost is already deducted above.
+				}
 			}
 		} else {
 			// Adding to a long position.
@@ -165,7 +218,9 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 		pos, exists := p.positions[fill.Symbol]
 		if !exists {
 			// Opening a new short position (negative qty).
-			p.cash += fill.Qty * fill.Price
+			if !futures {
+				p.cash += fill.Qty * fill.Price
+			}
 			p.positions[fill.Symbol] = &strategy.Position{
 				Symbol:  fill.Symbol,
 				Qty:     -fill.Qty,
@@ -180,9 +235,15 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 			if closedQty > pos.Qty {
 				closedQty = pos.Qty
 			}
-			p.realizedPL += (fill.Price - pos.AvgCost) * closedQty
+			realizedPL := (fill.Price - pos.AvgCost) * closedQty * mult
+			p.realizedPL += realizedPL
+			if futures {
+				p.cash += realizedPL
+			}
 		}
-		p.cash += fill.Qty * fill.Price
+		if !futures {
+			p.cash += fill.Qty * fill.Price
+		}
 		pos.Qty -= fill.Qty
 		if pos.Qty == 0 {
 			delete(p.positions, fill.Symbol)
@@ -202,12 +263,24 @@ func (p *SimulatedPortfolio) UpdateMarketPrice(symbol string, price float64) {
 	if !exists {
 		return
 	}
+
+	mult := p.multiplier(symbol)
+
 	if pos.Qty > 0 {
-		pos.MarketValue = pos.Qty * price
-		pos.UnrealizedPL = (price - pos.AvgCost) * pos.Qty
+		pos.UnrealizedPL = (price - pos.AvgCost) * pos.Qty * mult
+		if mult > 1.0 {
+			// For futures, market value IS the unrealized P&L (no notional).
+			pos.MarketValue = pos.UnrealizedPL
+		} else {
+			pos.MarketValue = pos.Qty * price
+		}
 	} else {
-		// Short position: market value is negative (liability), P&L inverted.
-		pos.MarketValue = pos.Qty * price // negative
-		pos.UnrealizedPL = (pos.AvgCost - price) * (-pos.Qty)
+		// Short position: P&L inverted.
+		pos.UnrealizedPL = (pos.AvgCost - price) * (-pos.Qty) * mult
+		if mult > 1.0 {
+			pos.MarketValue = pos.UnrealizedPL
+		} else {
+			pos.MarketValue = pos.Qty * price // negative
+		}
 	}
 }

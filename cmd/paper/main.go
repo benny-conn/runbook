@@ -22,7 +22,6 @@ import (
 	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
 	topstepxprovider "github.com/benny-conn/brandon-bot/providers/topstepx"
 	tradovateprovider "github.com/benny-conn/brandon-bot/providers/tradovate"
-	"github.com/benny-conn/brandon-bot/strategies"
 	"github.com/benny-conn/brandon-bot/strategies/script"
 	"github.com/benny-conn/brandon-bot/strategy"
 )
@@ -43,7 +42,7 @@ type RunConfig struct {
 }
 
 func main() {
-	stratName := flag.String("strategy", "ma_crossover", "strategy to run")
+	stratName := flag.String("strategy", "script", "strategy to run (script)")
 	symbolsFlag := flag.String("symbols", "AAPL", "comma-separated list of symbols")
 	capitalFlag := flag.Float64("capital", 10000, "starting capital in USD")
 	providerFlag := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, tradovate, topstepx, coinbase, or kalshi")
@@ -185,36 +184,30 @@ func resolveExecution(name string, cfg *RunConfig) provider.Execution {
 }
 
 func resolveStrategy(name, scriptPath string, strategyCfg json.RawMessage) (strategy.Strategy, error) {
-	switch name {
-	case "ma_crossover":
-		return strategies.NewMACrossover(), nil
-	case "rsi_pullback":
-		return strategies.NewRSIPullback(), nil
-	case "script":
-		if scriptPath == "" {
-			return nil, fmt.Errorf("--script flag is required when using --strategy=script")
-		}
-		src, err := os.ReadFile(scriptPath)
-		if err != nil {
-			return nil, fmt.Errorf("reading script %q: %w", scriptPath, err)
-		}
-		cfg := make(map[string]string)
-		if len(strategyCfg) > 0 {
-			var raw map[string]interface{}
-			if err := json.Unmarshal(strategyCfg, &raw); err != nil {
-				return nil, fmt.Errorf("parsing strategy config: %w", err)
-			}
-			for k, v := range raw {
-				cfg[k] = fmt.Sprint(v)
-			}
-		}
-		scriptName := strings.TrimSuffix(filepath.Base(scriptPath), filepath.Ext(scriptPath))
-		log.Printf("script strategy config: script=%s name=%s", scriptPath, scriptName)
-		for k, v := range cfg {
-			log.Printf("  %s=%s", k, v)
-		}
-		return script.New(scriptName, string(src), cfg)
-	default:
-		return nil, fmt.Errorf("available strategies: ma_crossover, rsi_pullback, script")
+	if name != "script" {
+		return nil, fmt.Errorf("unknown strategy %q — all strategies are scripts now; use --script=<file>", name)
 	}
+	if scriptPath == "" {
+		return nil, fmt.Errorf("--script flag is required")
+	}
+	src, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading script %q: %w", scriptPath, err)
+	}
+	cfg := make(map[string]string)
+	if len(strategyCfg) > 0 {
+		var raw map[string]interface{}
+		if err := json.Unmarshal(strategyCfg, &raw); err != nil {
+			return nil, fmt.Errorf("parsing strategy config: %w", err)
+		}
+		for k, v := range raw {
+			cfg[k] = fmt.Sprint(v)
+		}
+	}
+	scriptName := strings.TrimSuffix(filepath.Base(scriptPath), filepath.Ext(scriptPath))
+	log.Printf("script strategy config: script=%s name=%s", scriptPath, scriptName)
+	for k, v := range cfg {
+		log.Printf("  %s=%s", k, v)
+	}
+	return script.New(scriptName, string(src), cfg)
 }

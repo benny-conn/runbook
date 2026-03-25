@@ -81,14 +81,14 @@ func (r *Results) Print() {
 // EngineOption configures optional backtest engine behavior.
 type EngineOption func(*Engine)
 
-// WithLeverage sets the leverage multiplier for margin-based instruments (e.g. futures).
-// Default is 1.0 (full notional, for equities). For futures, use ~20.0 (5% margin).
-// This affects only the buy-side cash check — P&L is still calculated on full notional.
-func WithLeverage(l float64) EngineOption {
+// WithMultipliers sets per-symbol contract multipliers for futures P&L.
+// For equities, multiplier is 1.0 (default). For MNQ it's 2.0, ES is 50.0, etc.
+// When a symbol has multiplier > 1, the cash check uses futures semantics
+// (no notional cost) and P&L = price_diff × qty × multiplier.
+func WithMultipliers(m map[string]float64) EngineOption {
 	return func(e *Engine) {
-		if l > 0 {
-			e.leverage = l
-		}
+		e.multipliers = m
+		e.portfolio.SetMultipliers(m)
 	}
 }
 
@@ -97,19 +97,28 @@ type Engine struct {
 	strategy    strategy.Strategy
 	portfolio   *portfolio.SimulatedPortfolio
 	diagnostics Diagnostics
-	leverage    float64 // 1.0 = no leverage (equities), >1 = margin-based (futures)
+	multipliers map[string]float64 // per-symbol point value (nil = all equities)
 }
 
 func NewEngine(strat strategy.Strategy, initialCapital float64, opts ...EngineOption) *Engine {
 	e := &Engine{
 		strategy:  strat,
 		portfolio: portfolio.NewSimulatedPortfolio(initialCapital),
-		leverage:  1.0,
 	}
 	for _, opt := range opts {
 		opt(e)
 	}
 	return e
+}
+
+// multiplier returns the point value for a symbol (1.0 for equities).
+func (e *Engine) multiplier(symbol string) float64 {
+	if e.multipliers != nil {
+		if m, ok := e.multipliers[symbol]; ok && m > 0 {
+			return m
+		}
+	}
+	return 1.0
 }
 
 // fillOrders simulates fills for a set of orders using per-symbol prices.
@@ -126,6 +135,7 @@ func (e *Engine) fillOrders(orders []strategy.Order, symbolPrices map[string]flo
 
 		var realizedPL float64
 		fillQty := order.Qty
+		mult := e.multiplier(order.Symbol)
 
 		if order.Side == "buy" {
 			pos := e.portfolio.Position(order.Symbol)
@@ -134,15 +144,14 @@ func (e *Engine) fillOrders(orders []strategy.Order, symbolPrices map[string]flo
 				if fillQty > shortQty {
 					fillQty = shortQty
 				}
-				realizedPL = (pos.AvgCost - fillPrice) * fillQty
+				realizedPL = (pos.AvgCost - fillPrice) * fillQty * mult
+			} else if mult > 1.0 {
+				// Futures — no notional cash check. Scripts enforce contract limits.
 			} else {
+				// Equities — check cash.
 				cost := fillQty * fillPrice
-				requiredCash := cost
-				if e.leverage > 1 {
-					requiredCash = cost / e.leverage
-				}
-				if requiredCash > e.portfolio.Cash() {
-					e.diagnostics.trackRejection(fmt.Sprintf("%s buy: cost $%.2f (margin $%.2f) exceeds cash $%.2f", order.Symbol, cost, requiredCash, e.portfolio.Cash()))
+				if cost > e.portfolio.Cash() {
+					e.diagnostics.trackRejection(fmt.Sprintf("%s buy: cost $%.2f exceeds cash $%.2f", order.Symbol, cost, e.portfolio.Cash()))
 					continue
 				}
 			}
@@ -154,7 +163,7 @@ func (e *Engine) fillOrders(orders []strategy.Order, symbolPrices map[string]flo
 				if fillQty > pos.Qty {
 					fillQty = pos.Qty
 				}
-				realizedPL = (fillPrice - pos.AvgCost) * fillQty
+				realizedPL = (fillPrice - pos.AvgCost) * fillQty * mult
 			}
 		}
 

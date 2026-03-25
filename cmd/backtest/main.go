@@ -19,13 +19,12 @@ import (
 	kalshiprovider "github.com/benny-conn/brandon-bot/providers/kalshi"
 	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
 	topstepxprovider "github.com/benny-conn/brandon-bot/providers/topstepx"
-	"github.com/benny-conn/brandon-bot/strategies"
 	"github.com/benny-conn/brandon-bot/strategies/script"
 	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 func main() {
-	stratName := flag.String("strategy", "ma_crossover", "strategy to run")
+	stratName := flag.String("strategy", "script", "strategy to run (script)")
 	symbolsFlag := flag.String("symbols", "AAPL", "comma-separated list of symbols")
 	fromFlag := flag.String("from", "", "start date (YYYY-MM-DD)")
 	toFlag := flag.String("to", "", "end date (YYYY-MM-DD)")
@@ -149,7 +148,28 @@ func main() {
 		}
 	}
 
-	eng := backtest.NewEngine(strat, *capital)
+	// Query contract specs from provider for futures multipliers.
+	var opts []backtest.EngineOption
+	if csp, ok := md.(provider.ContractSpecProvider); ok {
+		multipliers := make(map[string]float64)
+		for _, sym := range symbols {
+			spec, err := csp.GetContractSpec(context.Background(), sym)
+			if err != nil {
+				log.Printf("contract spec for %s: %v (defaulting to equity)", sym, err)
+				continue
+			}
+			if spec.PointValue > 1.0 {
+				multipliers[sym] = spec.PointValue
+				fmt.Printf("  %s: point_value=%.2f (tick_size=%.4f tick_value=%.4f)\n",
+					sym, spec.PointValue, spec.TickSize, spec.TickValue)
+			}
+		}
+		if len(multipliers) > 0 {
+			opts = append(opts, backtest.WithMultipliers(multipliers))
+		}
+	}
+
+	eng := backtest.NewEngine(strat, *capital, opts...)
 	results := eng.Run(ticks)
 	results.Print()
 
@@ -175,36 +195,30 @@ func main() {
 }
 
 func resolveStrategy(name, scriptPath string, strategyCfg json.RawMessage) (strategy.Strategy, error) {
-	switch name {
-	case "ma_crossover":
-		return strategies.NewMACrossover(), nil
-	case "rsi_pullback":
-		return strategies.NewRSIPullback(), nil
-	case "script":
-		if scriptPath == "" {
-			return nil, fmt.Errorf("--script flag is required when using --strategy=script")
-		}
-		src, err := os.ReadFile(scriptPath)
-		if err != nil {
-			return nil, fmt.Errorf("reading script %q: %w", scriptPath, err)
-		}
-		cfg := make(map[string]string)
-		if len(strategyCfg) > 0 {
-			var raw map[string]interface{}
-			if err := json.Unmarshal(strategyCfg, &raw); err != nil {
-				return nil, fmt.Errorf("parsing strategy config: %w", err)
-			}
-			for k, v := range raw {
-				cfg[k] = fmt.Sprint(v)
-			}
-		}
-		scriptName := strings.TrimSuffix(filepath.Base(scriptPath), filepath.Ext(scriptPath))
-		log.Printf("script strategy config: script=%s name=%s", scriptPath, scriptName)
-		for k, v := range cfg {
-			log.Printf("  %s=%s", k, v)
-		}
-		return script.New(scriptName, string(src), cfg)
-	default:
-		return nil, fmt.Errorf("available strategies: ma_crossover, rsi_pullback, script")
+	if name != "script" {
+		return nil, fmt.Errorf("unknown strategy %q — all strategies are scripts now; use --script=<file>", name)
 	}
+	if scriptPath == "" {
+		return nil, fmt.Errorf("--script flag is required")
+	}
+	src, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading script %q: %w", scriptPath, err)
+	}
+	cfg := make(map[string]string)
+	if len(strategyCfg) > 0 {
+		var raw map[string]interface{}
+		if err := json.Unmarshal(strategyCfg, &raw); err != nil {
+			return nil, fmt.Errorf("parsing strategy config: %w", err)
+		}
+		for k, v := range raw {
+			cfg[k] = fmt.Sprint(v)
+		}
+	}
+	scriptName := strings.TrimSuffix(filepath.Base(scriptPath), filepath.Ext(scriptPath))
+	log.Printf("script strategy config: script=%s name=%s", scriptPath, scriptName)
+	for k, v := range cfg {
+		log.Printf("  %s=%s", k, v)
+	}
+	return script.New(scriptName, string(src), cfg)
 }

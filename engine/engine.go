@@ -171,6 +171,27 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		return fmt.Errorf("no symbols to trade — pass --symbols or implement SymbolResolver")
 	}
 
+	// If the provider supports contract specs (futures), query multipliers
+	// for all symbols and configure the portfolio accordingly.
+	if csp, ok := e.md.(provider.ContractSpecProvider); ok {
+		multipliers := make(map[string]float64)
+		for _, sym := range symbols {
+			spec, err := csp.GetContractSpec(ctx, sym)
+			if err != nil {
+				log.Printf("paper engine: contract spec for %s: %v (defaulting to equity)", sym, err)
+				continue
+			}
+			if spec.PointValue > 1.0 {
+				multipliers[sym] = spec.PointValue
+				log.Printf("paper engine: %s point_value=%.2f (tick_size=%.4f tick_value=%.4f)",
+					sym, spec.PointValue, spec.TickSize, spec.TickValue)
+			}
+		}
+		if len(multipliers) > 0 {
+			e.portfolio.SetMultipliers(multipliers)
+		}
+	}
+
 	// Read timeframes from the strategy (single source of truth).
 	timeframes := e.strategy.Timeframes()
 	if len(timeframes) == 0 {

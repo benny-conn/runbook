@@ -208,6 +208,111 @@ func TestPositionReturnsCopy(t *testing.T) {
 	}
 }
 
+// --- Futures (multiplier) tests ---
+
+func TestFutures_PLWithMultiplier(t *testing.T) {
+	// MNQ: point_value = 2.0
+	p := NewSimulatedPortfolio(50000)
+	p.SetMultipliers(map[string]float64{"MNQ": 2.0})
+
+	// Buy 1 contract at 24470
+	p.ApplyFill(strategy.Fill{Symbol: "MNQ", Side: "buy", Qty: 1, Price: 24470})
+
+	// Cash should NOT decrease by notional (futures don't exchange notional)
+	if !approxEqual(p.Cash(), 50000, 0.01) {
+		t.Errorf("Cash() = %v, want 50000 (futures: no notional deduction)", p.Cash())
+	}
+
+	// Update market price to 24474 (4 point gain)
+	p.UpdateMarketPrice("MNQ", 24474)
+	pos := p.Position("MNQ")
+
+	// Unrealized P&L = 4 points × 1 contract × $2/point = $8
+	if !approxEqual(pos.UnrealizedPL, 8, 0.01) {
+		t.Errorf("UnrealizedPL = %v, want 8", pos.UnrealizedPL)
+	}
+
+	// For futures, MarketValue IS the unrealized P&L
+	if !approxEqual(pos.MarketValue, 8, 0.01) {
+		t.Errorf("MarketValue = %v, want 8 (should equal unrealized P&L for futures)", pos.MarketValue)
+	}
+
+	// Equity = cash + unrealized P&L = 50000 + 8 = 50008
+	if !approxEqual(p.Equity(), 50008, 0.01) {
+		t.Errorf("Equity() = %v, want 50008", p.Equity())
+	}
+}
+
+func TestFutures_RealizedPL(t *testing.T) {
+	// ES: point_value = 50.0
+	p := NewSimulatedPortfolio(50000)
+	p.SetMultipliers(map[string]float64{"ES": 50.0})
+
+	p.ApplyFill(strategy.Fill{Symbol: "ES", Side: "buy", Qty: 1, Price: 5800})
+	p.ApplyFill(strategy.Fill{Symbol: "ES", Side: "sell", Qty: 1, Price: 5801})
+
+	// Realized P&L = 1 point × 1 contract × $50/point = $50
+	// Cash should be initial + realized P&L
+	if !approxEqual(p.Cash(), 50050, 0.01) {
+		t.Errorf("Cash() = %v, want 50050", p.Cash())
+	}
+	if p.Position("ES") != nil {
+		t.Error("expected position to be closed")
+	}
+}
+
+func TestFutures_ShortPL(t *testing.T) {
+	// MNQ: point_value = 2.0
+	p := NewSimulatedPortfolio(50000)
+	p.SetMultipliers(map[string]float64{"MNQ": 2.0})
+
+	// Short 2 contracts at 24470
+	p.ApplyFill(strategy.Fill{Symbol: "MNQ", Side: "sell", Qty: 2, Price: 24470})
+
+	// Cash unchanged (futures)
+	if !approxEqual(p.Cash(), 50000, 0.01) {
+		t.Errorf("Cash() = %v, want 50000", p.Cash())
+	}
+
+	// Cover at 24460 (10 point gain per contract)
+	p.ApplyFill(strategy.Fill{Symbol: "MNQ", Side: "buy", Qty: 2, Price: 24460})
+
+	// Realized P&L = 10 points × 2 contracts × $2/point = $40
+	if !approxEqual(p.Cash(), 50040, 0.01) {
+		t.Errorf("Cash() = %v, want 50040", p.Cash())
+	}
+}
+
+func TestFutures_ComputeFillPL(t *testing.T) {
+	p := NewSimulatedPortfolio(50000)
+	p.SetMultipliers(map[string]float64{"MNQ": 2.0})
+
+	p.ApplyFill(strategy.Fill{Symbol: "MNQ", Side: "buy", Qty: 1, Price: 24470})
+
+	// Compute P&L before applying the closing fill
+	closeFill := strategy.Fill{Symbol: "MNQ", Side: "sell", Qty: 1, Price: 24474}
+	pl := p.ComputeFillPL(closeFill)
+
+	// Should be 4 points × 1 × $2 = $8
+	if !approxEqual(pl, 8, 0.01) {
+		t.Errorf("ComputeFillPL = %v, want 8", pl)
+	}
+}
+
+func TestFutures_EquityBehaviorUnchanged(t *testing.T) {
+	// Without multipliers, everything should work as before (equity behavior)
+	p := NewSimulatedPortfolio(10000)
+	p.ApplyFill(strategy.Fill{Symbol: "AAPL", Side: "buy", Qty: 10, Price: 100})
+
+	if !approxEqual(p.Cash(), 9000, 0.01) {
+		t.Errorf("Cash() = %v, want 9000 (equity: notional deducted)", p.Cash())
+	}
+	p.UpdateMarketPrice("AAPL", 110)
+	if !approxEqual(p.Equity(), 10100, 0.01) {
+		t.Errorf("Equity() = %v, want 10100", p.Equity())
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	p := NewSimulatedPortfolio(100000)
 	var wg sync.WaitGroup

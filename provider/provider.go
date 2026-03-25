@@ -142,6 +142,21 @@ type ClientSideStops interface {
 	ClientSideStops()
 }
 
+// ContractSpec describes a futures contract's tick/point value properties.
+type ContractSpec struct {
+	Symbol     string
+	TickSize   float64 // minimum price increment (e.g. 0.25 for MNQ)
+	TickValue  float64 // dollar value per tick (e.g. 0.50 for MNQ)
+	PointValue float64 // dollar value per full point = tickValue / tickSize (e.g. 2.0 for MNQ)
+}
+
+// ContractSpecProvider is an optional interface a provider can implement to
+// expose futures contract specifications. The engine uses PointValue as the
+// P&L multiplier — for equities the default is 1.0.
+type ContractSpecProvider interface {
+	GetContractSpec(ctx context.Context, symbol string) (ContractSpec, error)
+}
+
 // BarToTick converts a provider Bar to a strategy Tick.
 func BarToTick(b Bar) strategy.Tick {
 	return strategy.Tick{
