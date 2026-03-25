@@ -78,18 +78,38 @@ func (r *Results) Print() {
 	}
 }
 
+// EngineOption configures optional backtest engine behavior.
+type EngineOption func(*Engine)
+
+// WithLeverage sets the leverage multiplier for margin-based instruments (e.g. futures).
+// Default is 1.0 (full notional, for equities). For futures, use ~20.0 (5% margin).
+// This affects only the buy-side cash check — P&L is still calculated on full notional.
+func WithLeverage(l float64) EngineOption {
+	return func(e *Engine) {
+		if l > 0 {
+			e.leverage = l
+		}
+	}
+}
+
 // Engine runs a strategy against a sorted slice of historical ticks.
 type Engine struct {
 	strategy    strategy.Strategy
 	portfolio   *portfolio.SimulatedPortfolio
 	diagnostics Diagnostics
+	leverage    float64 // 1.0 = no leverage (equities), >1 = margin-based (futures)
 }
 
-func NewEngine(strat strategy.Strategy, initialCapital float64) *Engine {
-	return &Engine{
+func NewEngine(strat strategy.Strategy, initialCapital float64, opts ...EngineOption) *Engine {
+	e := &Engine{
 		strategy:  strat,
 		portfolio: portfolio.NewSimulatedPortfolio(initialCapital),
+		leverage:  1.0,
 	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // fillOrders simulates fills for a set of orders using per-symbol prices.
@@ -117,8 +137,12 @@ func (e *Engine) fillOrders(orders []strategy.Order, symbolPrices map[string]flo
 				realizedPL = (pos.AvgCost - fillPrice) * fillQty
 			} else {
 				cost := fillQty * fillPrice
-				if cost > e.portfolio.Cash() {
-					e.diagnostics.trackRejection(fmt.Sprintf("%s buy: cost $%.2f exceeds cash $%.2f", order.Symbol, cost, e.portfolio.Cash()))
+				requiredCash := cost
+				if e.leverage > 1 {
+					requiredCash = cost / e.leverage
+				}
+				if requiredCash > e.portfolio.Cash() {
+					e.diagnostics.trackRejection(fmt.Sprintf("%s buy: cost $%.2f (margin $%.2f) exceeds cash $%.2f", order.Symbol, cost, requiredCash, e.portfolio.Cash()))
 					continue
 				}
 			}
