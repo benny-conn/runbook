@@ -41,17 +41,7 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 	e.portfolio = portfolio.NewSimulatedPortfolio(account.Cash)
 
 	// Apply any existing open positions.
-	for _, pos := range positions {
-		e.portfolio.ApplyFill(strategy.Fill{
-			Symbol: pos.Symbol,
-			Side:   "buy",
-			Qty:    pos.Qty,
-			Price:  pos.AvgEntryPrice,
-		})
-		if pos.CurrentPrice > 0 {
-			e.portfolio.UpdateMarketPrice(pos.Symbol, pos.CurrentPrice)
-		}
-	}
+	seedPositions(e.portfolio, positions)
 
 	log.Printf("recovery: portfolio seeded — cash=$%.2f equity=$%.2f open_positions=%d",
 		e.portfolio.Cash(), e.portfolio.Equity(), len(positions))
@@ -131,19 +121,10 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 	// Reset portfolio to the real broker state after warmup replay.
 	// Simulated fills shifted balances/positions — restore truth before going live.
 	e.portfolio = portfolio.NewSimulatedPortfolio(account.Cash)
-	for _, pos := range positions {
-		e.portfolio.ApplyFill(strategy.Fill{
-			Symbol: pos.Symbol,
-			Side:   "buy",
-			Qty:    pos.Qty,
-			Price:  pos.AvgEntryPrice,
-		})
-		if pos.CurrentPrice > 0 {
-			e.portfolio.UpdateMarketPrice(pos.Symbol, pos.CurrentPrice)
-		}
-	}
+	seedPositions(e.portfolio, positions)
 
 	// If the strategy supports position injection, tell it what we currently hold.
+	// Pass raw qty (negative for shorts) so the strategy can track direction.
 	if seeder, ok := e.strategy.(PositionSeeder); ok {
 		for _, pos := range positions {
 			seeder.SeedPosition(pos.Symbol, pos.Qty, pos.AvgEntryPrice)
@@ -154,6 +135,28 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 
 	log.Println("recovery: complete — ready to trade")
 	return nil
+}
+
+// seedPositions applies broker positions to the simulated portfolio.
+// Handles both long (positive qty) and short (negative qty) positions.
+func seedPositions(port *portfolio.SimulatedPortfolio, positions []provider.Position) {
+	for _, pos := range positions {
+		side := "buy"
+		qty := pos.Qty
+		if qty < 0 {
+			side = "sell"
+			qty = -qty
+		}
+		port.ApplyFill(strategy.Fill{
+			Symbol: pos.Symbol,
+			Side:   side,
+			Qty:    qty,
+			Price:  pos.AvgEntryPrice,
+		})
+		if pos.CurrentPrice > 0 {
+			port.UpdateMarketPrice(pos.Symbol, pos.CurrentPrice)
+		}
+	}
 }
 
 // simulateFills locally fills market orders during warmup replay so that
