@@ -62,7 +62,7 @@ func runScript(t *testing.T, src string) []strategy.Order {
 		Close:     102,
 		Volume:    1000,
 	}
-	return s.OnTick(tick, newMockPortfolio())
+	return s.OnBar("1m", tick, newMockPortfolio())
 }
 
 // ---------------------------------------------------------------------------
@@ -72,7 +72,7 @@ func runScript(t *testing.T, src string) []strategy.Order {
 func TestTA_SMA(t *testing.T) {
 	// SMA of [1,2,3,4,5] with period 3 = (3+4+5)/3 = 4.0
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var val = ta.sma([1,2,3,4,5], 3);
 	return [{ symbol: "TEST", side: "buy", qty: val, orderType: "market" }];
 }
@@ -93,7 +93,7 @@ func TestTA_EMA(t *testing.T) {
 	// i=3: 4*0.5 + 2.0*0.5 = 3.0
 	// i=4: 5*0.5 + 3.0*0.5 = 4.0
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var val = ta.ema([1,2,3,4,5], 3);
 	return [{ symbol: "TEST", side: "buy", qty: val, orderType: "market" }];
 }
@@ -111,7 +111,7 @@ func TestTA_RSI(t *testing.T) {
 	// Construct a series where we know the RSI.
 	// 14-period RSI on a monotonically increasing series: all gains, no losses => RSI = 100
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var closes = [];
 	for (var i = 0; i < 20; i++) closes.push(100 + i);
 	var val = ta.rsi(closes, 14);
@@ -130,7 +130,7 @@ function onTick(tick, portfolio) {
 func TestTA_RSI_AllLosses(t *testing.T) {
 	// Monotonically decreasing => RSI = 0
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var closes = [];
 	for (var i = 0; i < 20; i++) closes.push(200 - i);
 	var val = ta.rsi(closes, 14);
@@ -150,7 +150,7 @@ func TestTA_MACD(t *testing.T) {
 	// Test that MACD returns an object with macd, signal, histogram fields.
 	// Use a long enough series and verify histogram = macd - signal.
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var closes = [];
 	for (var i = 0; i < 50; i++) closes.push(100 + Math.sin(i * 0.3) * 10);
 	var m = ta.macd(closes, 12, 26, 9);
@@ -176,7 +176,7 @@ function onTick(tick, portfolio) {
 func TestTA_BollingerBands(t *testing.T) {
 	// BB on [10,10,10,10,10] period=5 stddev=2 => middle=10, upper=10, lower=10 (zero stddev)
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var bb = ta.bollingerBands([10,10,10,10,10], 5, 2);
 	return [{
 		symbol: "TEST", side: "buy", orderType: "market",
@@ -206,7 +206,7 @@ func TestTA_BollingerBands_WithVariance(t *testing.T) {
 	// mean = 3.0, variance = (4+1+0+1+4)/5 = 2.0, sd = sqrt(2)
 	// upper = 3 + 2*sqrt(2), lower = 3 - 2*sqrt(2)
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var bb = ta.bollingerBands([1,2,3,4,5], 5, 2);
 	return [{
 		symbol: "TEST", side: "buy", orderType: "market",
@@ -248,7 +248,7 @@ func TestTA_ATR(t *testing.T) {
 	// Wilder smooth: (4*2 + 4)/3 = 4
 	// ATR = 4.0
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var val = ta.atr([12,13,14,15,16], [8,9,10,11,12], [10,11,12,13,14], 3);
 	return [{ symbol: "TEST", side: "buy", qty: val, orderType: "market" }];
 }
@@ -266,7 +266,7 @@ func TestTA_Crossover(t *testing.T) {
 	// Crossover: fast was below slow, now above
 	// fast = [1, 3], slow = [2, 2] => prev: 1<=2, curr: 3>2 => true
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var cross = ta.crossover([1, 3], [2, 2]);
 	return [{ symbol: "TEST", side: "buy", qty: cross ? 1 : 0, orderType: "market" }];
 }
@@ -283,7 +283,7 @@ function onTick(tick, portfolio) {
 func TestTA_Crossover_False(t *testing.T) {
 	// No crossover: fast was above and stays above
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var cross = ta.crossover([3, 4], [2, 2]);
 	return [{ symbol: "TEST", side: "buy", qty: cross ? 1 : 0, orderType: "market" }];
 }
@@ -301,7 +301,7 @@ func TestTA_Crossunder(t *testing.T) {
 	// Crossunder: fast was above slow, now below
 	// fast = [3, 1], slow = [2, 2] => prev: 3>=2, curr: 1<2 => true
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var cross = ta.crossunder([3, 1], [2, 2]);
 	return [{ symbol: "TEST", side: "buy", qty: cross ? 1 : 0, orderType: "market" }];
 }
@@ -318,7 +318,7 @@ function onTick(tick, portfolio) {
 func TestTA_Percentile(t *testing.T) {
 	// Percentile of [10,20,30,40,50] at 50th percentile = 30 (median)
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var val = ta.percentile([10,20,30,40,50], 50);
 	return [{ symbol: "TEST", side: "buy", qty: val, orderType: "market" }];
 }
@@ -336,7 +336,7 @@ func TestTA_Percentile_25th(t *testing.T) {
 	// 25th percentile of [10,20,30,40,50]
 	// idx = 0.25 * 4 = 1.0 => sorted[1] = 20
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var val = ta.percentile([10,20,30,40,50], 25);
 	return [{ symbol: "TEST", side: "buy", qty: val, orderType: "market" }];
 }
@@ -353,7 +353,7 @@ function onTick(tick, portfolio) {
 func TestTA_Returns(t *testing.T) {
 	// returns([100, 110, 105]) = [0.1, -0.04545...]
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var rets = ta.returns([100, 110, 105]);
 	// Encode first two returns in qty and limitPrice
 	return [{
@@ -382,7 +382,7 @@ func TestTA_MaxDrawdown(t *testing.T) {
 	// Peak=100, dd=0; Peak=120, dd=0; dd=(120-90)/120=0.25; dd=(120-110)/120=0.0833
 	// maxDD = 0.25
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var val = ta.maxDrawdown([100, 120, 90, 110]);
 	return [{ symbol: "TEST", side: "buy", qty: val, orderType: "market" }];
 }
@@ -403,7 +403,7 @@ func TestTA_Sharpe(t *testing.T) {
 	// = sqrt(0.000024) = 0.004899
 	// sharpe = (0.014 - 0) / 0.004899 * sqrt(252)
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var val = ta.sharpe([0.01, 0.02, 0.01, 0.02, 0.01], 0);
 	return [{ symbol: "TEST", side: "buy", qty: val, orderType: "market" }];
 }
@@ -437,7 +437,7 @@ function onTick(tick, portfolio) {
 
 func TestParseOrders_AllFields(t *testing.T) {
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	return [{
 		symbol: "AAPL",
 		side: "buy",
@@ -487,7 +487,7 @@ function onTick(tick, portfolio) {
 
 func TestParseOrders_MultipleOrders(t *testing.T) {
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	return [
 		{ symbol: "AAPL", side: "buy", qty: 5, orderType: "limit", limitPrice: 150, reason: "entry" },
 		{ symbol: "GOOG", side: "sell", qty: 3, orderType: "market", stopLoss: 100, takeProfit: 200 }
@@ -511,7 +511,7 @@ function onTick(tick, portfolio) {
 
 func TestParseOrders_EmptyReturn(t *testing.T) {
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	return [];
 }
 `
@@ -523,7 +523,7 @@ function onTick(tick, portfolio) {
 
 func TestParseOrders_NullReturn(t *testing.T) {
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	return null;
 }
 `
@@ -536,7 +536,7 @@ function onTick(tick, portfolio) {
 func TestParseOrders_IntegerPrices(t *testing.T) {
 	// Verify integer prices are correctly extracted (int64 -> float64 path)
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	return [{
 		symbol: "TEST",
 		side: "buy",
@@ -576,7 +576,7 @@ func TestML_LogisticRegression(t *testing.T) {
 	// Train on linearly separable data: x > 5 => label 1, else 0
 	// Then predict for x=1 (expect < 0.5) and x=9 (expect > 0.5)
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var features = [[1],[2],[3],[4],[5],[6],[7],[8],[9],[10]];
 	var labels   = [ 0,  0,  0,  0,  0,  1,  1,  1,  1,  1 ];
 	var model = ml.logisticRegression(features, labels, { maxIter: 1000, lr: 0.5 });
@@ -604,7 +604,7 @@ function onTick(tick, portfolio) {
 func TestML_DecisionTree(t *testing.T) {
 	// Train on simple threshold: feature > 5 => 1, else 0
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var features = [[1],[2],[3],[4],[5],[6],[7],[8],[9],[10]];
 	var labels   = [ 0,  0,  0,  0,  0,  1,  1,  1,  1,  1 ];
 	var model = ml.decisionTree(features, labels, { maxDepth: 5, minSamples: 1 });
@@ -632,7 +632,7 @@ function onTick(tick, portfolio) {
 func TestML_RandomForest(t *testing.T) {
 	// Train on linearly separable 2D data
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var features = [];
 	var labels = [];
 	for (var i = 0; i < 50; i++) {
@@ -664,7 +664,7 @@ function onTick(tick, portfolio) {
 func TestML_KMeans(t *testing.T) {
 	// Three well-separated clusters
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var features = [
 		[0, 0], [1, 0], [0, 1], [1, 1],
 		[10, 10], [11, 10], [10, 11], [11, 11],
@@ -697,7 +697,7 @@ func TestML_Normalize(t *testing.T) {
 	// min=[0,10], max=[10,30], range=[10,20]
 	// [[0,0],[0.5,0.5],[1,1]]
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var result = ml.normalize([[0,10],[5,20],[10,30]]);
 	return [{
 		symbol: "TEST", side: "buy", orderType: "market",
@@ -731,7 +731,7 @@ func TestML_Standardize(t *testing.T) {
 	// mean=3, std=sqrt((4+0+4)/3)=sqrt(8/3)
 	// [0] = (1-3)/std, [1] = 0, [2] = (5-3)/std
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var result = ml.standardize([[1],[3],[5]]);
 	return [{
 		symbol: "TEST", side: "buy", orderType: "market",
@@ -767,7 +767,7 @@ function onTick(tick, portfolio) {
 
 func TestPortfolioAccess(t *testing.T) {
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var c = portfolio.cash();
 	var e = portfolio.equity();
 	var pl = portfolio.totalPL();
@@ -793,7 +793,7 @@ function onTick(tick, portfolio) {
 		Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 		Open:      100, High: 105, Low: 95, Close: 102, Volume: 1000,
 	}
-	orders := s.OnTick(tick, p)
+	orders := s.OnBar("1m", tick, p)
 	if len(orders) != 1 {
 		t.Fatalf("expected 1 order, got %d", len(orders))
 	}
@@ -810,7 +810,7 @@ function onTick(tick, portfolio) {
 
 func TestPortfolioPosition(t *testing.T) {
 	src := `
-function onTick(tick, portfolio) {
+function onBar(timeframe, tick, portfolio) {
 	var pos = portfolio.position("AAPL");
 	if (!pos) return [];
 	return [{
@@ -836,7 +836,7 @@ function onTick(tick, portfolio) {
 		Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 		Open:      100, High: 105, Low: 95, Close: 102, Volume: 1000,
 	}
-	orders := s.OnTick(tick, p)
+	orders := s.OnBar("1m", tick, p)
 	if len(orders) != 1 {
 		t.Fatalf("expected 1 order, got %d", len(orders))
 	}

@@ -60,7 +60,7 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 	// If WarmupFrom is set (e.g. strategy creation date), warm up from that time
 	// but cap at MaxWarmupBars to avoid fetching years of data.
 	end := time.Now()
-	start := end.Add(-warmupWindow(e.config.Timeframe, e.config.WarmupBars))
+	start := end.Add(-warmupWindow(e.baseTimeframe, e.config.WarmupBars))
 
 	if !e.config.WarmupFrom.IsZero() {
 		fromStart := e.config.WarmupFrom
@@ -68,7 +68,7 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 		if maxBars <= 0 {
 			maxBars = 300
 		}
-		maxStart := end.Add(-warmupWindow(e.config.Timeframe, maxBars))
+		maxStart := end.Add(-warmupWindow(e.baseTimeframe, maxBars))
 		if fromStart.Before(maxStart) {
 			fromStart = maxStart
 		}
@@ -78,9 +78,9 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 		log.Printf("recovery: using WarmupFrom=%s (capped at %d bars)", e.config.WarmupFrom.Format("2006-01-02"), maxBars)
 	}
 
-	log.Printf("recovery: fetching %s history from %s for warm-up...", e.config.Timeframe, start.Format("2006-01-02"))
+	log.Printf("recovery: fetching %s history from %s for warm-up...", e.baseTimeframe, start.Format("2006-01-02"))
 
-	bars, err := e.md.FetchBarsMulti(ctx, symbols, e.config.Timeframe, start, end)
+	bars, err := e.md.FetchBarsMulti(ctx, symbols, e.baseTimeframe, start, end)
 	if err != nil {
 		log.Printf("recovery: warm-up bar fetch failed (non-fatal, skipping replay): %v", err)
 	} else {
@@ -111,14 +111,9 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 				e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
 			}
 
-			orders := e.strategy.OnTick(tick, e.portfolio)
-			simulateFills(e.strategy, e.portfolio, orders, tick)
-
-			// Feed through aggregators so higher-timeframe indicators warm up.
-			// onBar is called inline — warmingUp flag ensures fills are simulated.
-			for _, agg := range e.aggregators {
-				agg.Update(tick)
-			}
+			// handleBar calls OnBar + feeds aggregators; warmingUp flag
+			// ensures any returned orders are simulated locally.
+			e.handleBar(e.baseTimeframe, tick)
 		}
 
 		// Fire final OnMarketClose so strategy state is up to date.

@@ -48,7 +48,7 @@ type Position struct {
 	UnrealizedPL float64
 }
 
-// Portfolio is a read-only view of the current account state passed into OnTick.
+// Portfolio is a read-only view of the current account state passed into OnBar.
 type Portfolio interface {
 	Cash() float64
 	Equity() float64
@@ -69,7 +69,7 @@ type Trade struct {
 
 // Configurable is an optional interface a strategy can implement to accept
 // a JSON config file passed via --config on the CLI. Configure is called once
-// after the strategy is constructed and before the first OnTick, so it can
+// after the strategy is constructed and before the first OnBar, so it can
 // override any defaults set in the constructor.
 // Partial configs are fine — only fields present in the JSON are updated;
 // missing fields keep their constructor defaults.
@@ -78,11 +78,19 @@ type Configurable interface {
 }
 
 // Strategy is implemented by any trading algorithm.
-// The engine calls OnTick on every price update and executes any returned orders.
-// All strategy state must live inside the Strategy implementation — the engine is stateless w.r.t. strategy internals.
+//
+// Timeframes returns the bar resolutions the strategy needs (e.g. ["1m"],
+// ["1m","5m","1h"]). The engine subscribes to the finest timeframe from the
+// list and aggregates higher-timeframe bars locally. This is the single source
+// of truth for what timeframes are used — it is not configurable via CLI flags.
+//
+// OnBar is called for every completed bar at every declared timeframe.
+// The timeframe parameter indicates which resolution fired (e.g. "1m", "5m").
+// For single-timeframe strategies, it will always be the one declared timeframe.
 type Strategy interface {
 	Name() string
-	OnTick(tick Tick, portfolio Portfolio) []Order
+	Timeframes() []string
+	OnBar(timeframe string, tick Tick, portfolio Portfolio) []Order
 	OnFill(fill Fill)
 }
 
@@ -90,23 +98,8 @@ type Strategy interface {
 // individual trade prints instead of (or in addition to) completed bars.
 // If the strategy implements this, the paper engine will also subscribe to
 // the trade stream for the requested symbols.
-// OnTick is still called for bar events — implement it as a no-op if not needed.
 type TradeSubscriber interface {
 	OnTrade(trade Trade, portfolio Portfolio) []Order
-}
-
-// MultiTimeframeSubscriber is an optional interface a strategy can implement
-// to receive bars at multiple timeframes simultaneously. Timeframes returns
-// all timeframes the strategy needs (e.g. ["1m", "5m", "1h"]). The engine
-// subscribes to the finest timeframe and builds higher-timeframe bars by
-// aggregating base bars. OnTick continues to fire for every base bar;
-// OnBar fires when a higher-timeframe bar completes.
-//
-// Timeframes must be clean multiples of each other (e.g. 1m→5m, 5m→15m).
-// The engine picks the finest as the base subscription timeframe.
-type MultiTimeframeSubscriber interface {
-	Timeframes() []string
-	OnBar(timeframe string, tick Tick, portfolio Portfolio) []Order
 }
 
 // Quote represents a real-time bid/ask update from the exchange.
@@ -142,7 +135,7 @@ type InitContext struct {
 	// Deprecated: Use Search instead. Kept for backward compatibility.
 	Discovery MarketDiscovery
 
-	// AddSymbols dynamically subscribes to new symbols mid-run. Call from OnTick,
+	// AddSymbols dynamically subscribes to new symbols mid-run. Call from OnBar,
 	// OnFill, etc. to start streaming data for new symbols without restarting.
 	// Nil during backtest or before the live stream starts.
 	AddSymbols func(symbols ...string)

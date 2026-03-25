@@ -29,39 +29,12 @@ func main() {
 	symbolsFlag := flag.String("symbols", "AAPL", "comma-separated list of symbols")
 	fromFlag := flag.String("from", "", "start date (YYYY-MM-DD)")
 	toFlag := flag.String("to", "", "end date (YYYY-MM-DD)")
-	timeframeFlag := flag.String("timeframe", "1d", "bar timeframe: 1m, 5m, 15m, 1h, 1d")
 	capital := flag.Float64("capital", 10000, "starting capital in USD")
 	feedFlag := flag.String("feed", "iex", "Alpaca feed: iex or sip")
 	dataProviderFlag := flag.String("data-provider", "alpaca", "market data provider: alpaca, massive, coinbase, or kalshi")
 	scriptFlag := flag.String("script", "", "path to a .js script file (required when --strategy=script)")
 	configFlag := flag.String("config", "", "path to JSON config file for the strategy")
 	flag.Parse()
-
-	// Default date range based on timeframe when --from/--to are omitted.
-	var from, to time.Time
-	now := time.Now().UTC().Truncate(24 * time.Hour)
-
-	if *toFlag == "" {
-		to = now.Add(24*time.Hour - time.Second)
-	} else {
-		var err error
-		to, err = time.Parse("2006-01-02", *toFlag)
-		if err != nil {
-			log.Fatalf("invalid --to date: %v", err)
-		}
-		to = to.Add(24*time.Hour - time.Second)
-	}
-
-	if *fromFlag == "" {
-		dur := backtest.DefaultDuration(*timeframeFlag)
-		from = to.Add(-dur)
-	} else {
-		var err error
-		from, err = time.Parse("2006-01-02", *fromFlag)
-		if err != nil {
-			log.Fatalf("invalid --from date: %v", err)
-		}
-	}
 
 	symbols := strings.Split(*symbolsFlag, ",")
 	for i, s := range symbols {
@@ -100,8 +73,45 @@ func main() {
 		}
 	}
 
+	// Get timeframe from the strategy (single source of truth).
+	timeframes := strat.Timeframes()
+	if len(timeframes) == 0 {
+		log.Fatal("strategy Timeframes() must return at least one timeframe")
+	}
+	baseTimeframe := timeframes[0]
+	// Use the finest (shortest) timeframe for data fetching.
+	for _, tf := range timeframes[1:] {
+		if backtest.DefaultDuration(tf) < backtest.DefaultDuration(baseTimeframe) {
+			baseTimeframe = tf
+		}
+	}
+
+	// Default date range based on timeframe when --from/--to are omitted.
+	var from, to time.Time
+	now := time.Now().UTC().Truncate(24 * time.Hour)
+
+	if *toFlag == "" {
+		to = now.Add(24*time.Hour - time.Second)
+	} else {
+		to, err = time.Parse("2006-01-02", *toFlag)
+		if err != nil {
+			log.Fatalf("invalid --to date: %v", err)
+		}
+		to = to.Add(24*time.Hour - time.Second)
+	}
+
+	if *fromFlag == "" {
+		dur := backtest.DefaultDuration(baseTimeframe)
+		from = to.Add(-dur)
+	} else {
+		from, err = time.Parse("2006-01-02", *fromFlag)
+		if err != nil {
+			log.Fatalf("invalid --from date: %v", err)
+		}
+	}
+
 	fmt.Printf("Fetching %s bars for %s from %s to %s (provider=%s)...\n",
-		*timeframeFlag, strings.Join(symbols, ", "),
+		baseTimeframe, strings.Join(symbols, ", "),
 		from.Format("2006-01-02"), to.Format("2006-01-02"), *dataProviderFlag)
 
 	var md provider.MarketData
@@ -119,7 +129,7 @@ func main() {
 	default:
 		log.Fatalf("unknown data provider %q — use alpaca, massive, topstepx, coinbase, or kalshi", *dataProviderFlag)
 	}
-	bars, err := md.FetchBarsMulti(context.Background(), symbols, *timeframeFlag, from, to)
+	bars, err := md.FetchBarsMulti(context.Background(), symbols, baseTimeframe, from, to)
 	if err != nil {
 		log.Fatalf("fetching historical data: %v", err)
 	}
@@ -153,7 +163,7 @@ func main() {
 	runID, err := store.SaveBacktestRun(db.BacktestRunParams{
 		Strategy:  *stratName,
 		Symbols:   symbols,
-		Timeframe: *timeframeFlag,
+		Timeframe: baseTimeframe,
 		From:      from,
 		To:        to,
 	}, results)

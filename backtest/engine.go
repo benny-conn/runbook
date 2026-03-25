@@ -213,8 +213,9 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		currentDate string
 	)
 
-	// Multi-timeframe support: set up aggregators if the strategy wants it.
-	mts, hasMTF := e.strategy.(strategy.MultiTimeframeSubscriber)
+	// Multi-timeframe support: set up aggregators when strategy declares >1 timeframe.
+	var hasMTF bool
+	var baseTimeframe string
 	var aggregators []*engine.BarAggregator
 	type completedBar struct {
 		timeframe string
@@ -222,13 +223,14 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 	}
 	var completedBars []completedBar
 
-	if hasMTF {
-		timeframes := mts.Timeframes()
-		if len(timeframes) > 1 {
-			sorted, err := engine.SortTimeframes(timeframes)
-			if err != nil {
-				return &Results{InitialCapital: e.portfolio.Cash()}
-			}
+	{
+		timeframes := e.strategy.Timeframes()
+		sorted, _ := engine.SortTimeframes(timeframes)
+		if len(sorted) > 0 {
+			baseTimeframe = sorted[0]
+		}
+		if len(sorted) > 1 {
+			hasMTF = true
 			for _, tf := range sorted[1:] {
 				dur, _ := engine.ParseTimeframe(tf)
 				agg := engine.NewBarAggregator(tf, dur, func(timeframe string, tick strategy.Tick) {
@@ -236,8 +238,6 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 				})
 				aggregators = append(aggregators, agg)
 			}
-		} else {
-			hasMTF = false
 		}
 	}
 
@@ -278,7 +278,7 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		}
 
 		// --- Ask the strategy what to do ---
-		orders := e.strategy.OnTick(tick, e.portfolio)
+		orders := e.strategy.OnBar(baseTimeframe, tick, e.portfolio)
 		if len(orders) > 0 {
 			// Find next bar for fill simulation.
 			nextIdx := nextSameSymbol[i]
@@ -295,7 +295,7 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 				agg.Update(tick)
 			}
 			for _, cb := range completedBars {
-				barOrders := mts.OnBar(cb.timeframe, cb.tick, e.portfolio)
+				barOrders := e.strategy.OnBar(cb.timeframe, cb.tick, e.portfolio)
 				if len(barOrders) > 0 {
 					nextIdx := nextSameSymbol[i]
 					if nextIdx != -1 {

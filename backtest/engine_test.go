@@ -15,16 +15,17 @@ func approxEqual(a, b, tol float64) bool {
 // --- Mock strategy for testing ---
 
 type mockStrategy struct {
-	name    string
-	onTick  func(tick strategy.Tick, p strategy.Portfolio) []strategy.Order
-	onFill  func(fill strategy.Fill)
-	fills   []strategy.Fill
+	name  string
+	onBar func(timeframe string, tick strategy.Tick, p strategy.Portfolio) []strategy.Order
+	onFill func(fill strategy.Fill)
+	fills  []strategy.Fill
 }
 
-func (m *mockStrategy) Name() string { return m.name }
-func (m *mockStrategy) OnTick(tick strategy.Tick, p strategy.Portfolio) []strategy.Order {
-	if m.onTick != nil {
-		return m.onTick(tick, p)
+func (m *mockStrategy) Name() string              { return m.name }
+func (m *mockStrategy) Timeframes() []string       { return []string{"1m"} }
+func (m *mockStrategy) OnBar(timeframe string, tick strategy.Tick, p strategy.Portfolio) []strategy.Order {
+	if m.onBar != nil {
+		return m.onBar(timeframe, tick, p)
 	}
 	return nil
 }
@@ -65,7 +66,7 @@ func TestEngine_BuyAndSell(t *testing.T) {
 	callCount := 0
 	strat := &mockStrategy{
 		name: "buy_sell",
-		onTick: func(tick strategy.Tick, p strategy.Portfolio) []strategy.Order {
+		onBar: func(_ string, tick strategy.Tick, p strategy.Portfolio) []strategy.Order {
 			callCount++
 			if callCount == 2 {
 				return []strategy.Order{{
@@ -114,7 +115,7 @@ func TestEngine_BuyAndSell(t *testing.T) {
 func TestEngine_InsufficientCash(t *testing.T) {
 	strat := &mockStrategy{
 		name: "insufficient",
-		onTick: func(tick strategy.Tick, p strategy.Portfolio) []strategy.Order {
+		onBar: func(_ string, tick strategy.Tick, p strategy.Portfolio) []strategy.Order {
 			return []strategy.Order{{
 				Symbol: "AAPL", Side: "buy", Qty: 1000, OrderType: "market",
 			}}
@@ -138,7 +139,7 @@ func TestEngine_InsufficientCash(t *testing.T) {
 func TestEngine_LastBarOrdersDropped(t *testing.T) {
 	strat := &mockStrategy{
 		name: "last_bar",
-		onTick: func(tick strategy.Tick, p strategy.Portfolio) []strategy.Order {
+		onBar: func(_ string, tick strategy.Tick, p strategy.Portfolio) []strategy.Order {
 			return []strategy.Order{{
 				Symbol: "AAPL", Side: "buy", Qty: 1, OrderType: "market",
 			}}
@@ -165,7 +166,7 @@ func TestEngine_MultiSymbol(t *testing.T) {
 	bought := map[string]bool{}
 	strat := &mockStrategy{
 		name: "multi",
-		onTick: func(tick strategy.Tick, p strategy.Portfolio) []strategy.Order {
+		onBar: func(_ string, tick strategy.Tick, p strategy.Portfolio) []strategy.Order {
 			if !bought[tick.Symbol] {
 				bought[tick.Symbol] = true
 				return []strategy.Order{{

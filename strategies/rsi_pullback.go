@@ -108,7 +108,8 @@ func NewRSIPullback() *RSIPullback {
 	return &RSIPullback{symbols: make(map[string]*rsiSymbolState)}
 }
 
-func (s *RSIPullback) Name() string { return "rsi_pullback" }
+func (s *RSIPullback) Name() string              { return "rsi_pullback" }
+func (s *RSIPullback) Timeframes() []string       { return []string{"1m"} }
 
 func (s *RSIPullback) getOrCreate(symbol string) *rsiSymbolState {
 	if st, ok := s.symbols[symbol]; ok {
@@ -122,7 +123,7 @@ func (s *RSIPullback) getOrCreate(symbol string) *rsiSymbolState {
 	return st
 }
 
-func (s *RSIPullback) OnTick(tick strategy.Tick, portfolio strategy.Portfolio) []strategy.Order {
+func (s *RSIPullback) OnBar(_ string, tick strategy.Tick, portfolio strategy.Portfolio) []strategy.Order {
 	st := s.getOrCreate(tick.Symbol)
 
 	ma := st.ma200.update(tick.Close)

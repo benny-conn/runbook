@@ -178,7 +178,7 @@ func TestMACrossover_NeedsWarmup(t *testing.T) {
 
 	// First 20 ticks should produce no orders (need 21 for slow EMA)
 	for i := 0; i < 20; i++ {
-		orders := m.OnTick(strategy.Tick{Symbol: "AAPL", Close: 100 + float64(i)}, p)
+		orders := m.OnBar("1m",strategy.Tick{Symbol: "AAPL", Close: 100 + float64(i)}, p)
 		if len(orders) > 0 {
 			t.Errorf("tick %d: expected no orders during warmup, got %d", i, len(orders))
 		}
@@ -191,13 +191,13 @@ func TestMACrossover_BullishCrossover(t *testing.T) {
 
 	// Feed 21 ticks of flat data to warm up both EMAs
 	for i := 0; i < 21; i++ {
-		m.OnTick(strategy.Tick{Symbol: "AAPL", Close: 100}, p)
+		m.OnBar("1m",strategy.Tick{Symbol: "AAPL", Close: 100}, p)
 	}
 
 	// Now feed rising prices to make fast EMA cross above slow EMA
 	var lastOrders []strategy.Order
 	for i := 0; i < 20; i++ {
-		lastOrders = m.OnTick(strategy.Tick{Symbol: "AAPL", Close: 100 + float64(i)*5}, p)
+		lastOrders = m.OnBar("1m",strategy.Tick{Symbol: "AAPL", Close: 100 + float64(i)*5}, p)
 		if len(lastOrders) > 0 {
 			break
 		}
@@ -217,14 +217,14 @@ func TestMACrossover_StopLoss(t *testing.T) {
 
 	// Warm up both EMAs (need 21 ticks for slow EMA)
 	for i := 0; i < 21; i++ {
-		m.OnTick(strategy.Tick{Symbol: "AAPL", Close: 100}, p)
+		m.OnBar("1m",strategy.Tick{Symbol: "AAPL", Close: 100}, p)
 	}
 
 	// Simulate being in a position at entry price 100
 	m.SeedPosition("AAPL", 10, 100)
 
 	// Price drops 3% below entry (below 2% threshold)
-	orders := m.OnTick(strategy.Tick{Symbol: "AAPL", Close: 97}, p)
+	orders := m.OnBar("1m",strategy.Tick{Symbol: "AAPL", Close: 97}, p)
 	if len(orders) != 1 || orders[0].Side != "sell" {
 		t.Errorf("expected stop loss sell order, got %v", orders)
 	}
@@ -261,8 +261,8 @@ func TestMACrossover_MultiSymbol(t *testing.T) {
 
 	// Feed ticks for two symbols
 	for i := 0; i < 25; i++ {
-		m.OnTick(strategy.Tick{Symbol: "AAPL", Close: 100}, p)
-		m.OnTick(strategy.Tick{Symbol: "GOOG", Close: 200}, p)
+		m.OnBar("1m",strategy.Tick{Symbol: "AAPL", Close: 100}, p)
+		m.OnBar("1m",strategy.Tick{Symbol: "GOOG", Close: 200}, p)
 	}
 
 	if len(m.symbols) != 2 {
@@ -288,7 +288,7 @@ func TestRSIPullback_NeedsWarmup(t *testing.T) {
 
 	// Need 200 ticks for SMA warmup
 	for i := 0; i < 200; i++ {
-		orders := s.OnTick(strategy.Tick{Symbol: "AAPL", Close: 100 + float64(i)*0.01}, p)
+		orders := s.OnBar("1m",strategy.Tick{Symbol: "AAPL", Close: 100 + float64(i)*0.01}, p)
 		if len(orders) > 0 {
 			t.Errorf("tick %d: expected no orders during warmup", i)
 		}
@@ -303,11 +303,11 @@ func TestRSIPullback_StopLoss(t *testing.T) {
 
 	// Feed enough data to warm up indicators
 	for i := 0; i < 200; i++ {
-		s.OnTick(strategy.Tick{Symbol: "AAPL", Close: 100}, p)
+		s.OnBar("1m",strategy.Tick{Symbol: "AAPL", Close: 100}, p)
 	}
 
 	// Price drops 3% below entry
-	orders := s.OnTick(strategy.Tick{Symbol: "AAPL", Close: 97}, p)
+	orders := s.OnBar("1m",strategy.Tick{Symbol: "AAPL", Close: 97}, p)
 	if len(orders) != 1 || orders[0].Side != "sell" {
 		t.Errorf("expected stop loss sell, got %v", orders)
 	}

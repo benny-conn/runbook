@@ -46,7 +46,6 @@ func main() {
 	stratName := flag.String("strategy", "ma_crossover", "strategy to run")
 	symbolsFlag := flag.String("symbols", "AAPL", "comma-separated list of symbols")
 	capitalFlag := flag.Float64("capital", 10000, "starting capital in USD")
-	timeframeFlag := flag.String("timeframe", "1m", "bar timeframe: 1s, 1m, 5m, 15m, 1h, 1d")
 	providerFlag := flag.String("provider", "alpaca", "data + execution provider: alpaca, ibkr, tradovate, topstepx, coinbase, or kalshi")
 	dataProviderFlag := flag.String("data-provider", "", "market data provider override: massive, alpaca, ibkr, tradovate, coinbase")
 	execProviderFlag := flag.String("exec-provider", "", "execution provider override: alpaca, ibkr, tradovate, coinbase")
@@ -123,7 +122,7 @@ func main() {
 		}
 	}
 
-	cfg := engine.DefaultConfig(*capitalFlag, *timeframeFlag)
+	cfg := engine.DefaultConfig(*capitalFlag)
 	eng := engine.NewEngine(strat, md, exec, store, cfg)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -133,8 +132,8 @@ func main() {
 	if *dataProviderFlag != "" {
 		providerLabel = fmt.Sprintf("data=%s exec=%s", *dataProviderFlag, *execProviderFlag)
 	}
-	log.Printf("starting paper trading | provider=%s strategy=%s symbols=%s timeframe=%s capital=%.2f",
-		providerLabel, *stratName, strings.Join(symbols, ","), *timeframeFlag, *capitalFlag)
+	log.Printf("starting paper trading | provider=%s strategy=%s symbols=%s capital=%.2f",
+		providerLabel, *stratName, strings.Join(symbols, ","), *capitalFlag)
 
 	if err := eng.Run(ctx, symbols); err != nil && err != context.Canceled {
 		log.Fatalf("engine stopped: %v", err)

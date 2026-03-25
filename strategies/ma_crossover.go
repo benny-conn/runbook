@@ -60,7 +60,8 @@ func NewMACrossover() *MACrossover {
 	return &MACrossover{symbols: make(map[string]*maSymbolState)}
 }
 
-func (m *MACrossover) Name() string { return "ma_crossover" }
+func (m *MACrossover) Name() string              { return "ma_crossover" }
+func (m *MACrossover) Timeframes() []string       { return []string{"1m"} }
 
 func (m *MACrossover) getOrCreate(symbol string) *maSymbolState {
 	if s, ok := m.symbols[symbol]; ok {
@@ -71,7 +72,7 @@ func (m *MACrossover) getOrCreate(symbol string) *maSymbolState {
 	return s
 }
 
-func (m *MACrossover) OnTick(tick strategy.Tick, portfolio strategy.Portfolio) []strategy.Order {
+func (m *MACrossover) OnBar(_ string, tick strategy.Tick, portfolio strategy.Portfolio) []strategy.Order {
 	s := m.getOrCreate(tick.Symbol)
 
 	s.fast.update(tick.Close)

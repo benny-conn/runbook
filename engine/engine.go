@@ -42,7 +42,6 @@ func NYSESchedule() *MarketSchedule {
 // Config holds engine configuration.
 type Config struct {
 	Capital        float64
-	Timeframe      string
 	WarmupBars     int             // number of historical bars to replay on startup for indicator warm-up
 	MaxWarmupBars  int             // cap on warmup bars when using WarmupFrom (default 300)
 	WarmupFrom     time.Time       // if set, warm up from this time (e.g. strategy creation date); 0 = use WarmupBars only
@@ -50,10 +49,9 @@ type Config struct {
 	MarketSchedule *MarketSchedule // market hours for DailySessionHandler; nil defaults to NYSE
 }
 
-func DefaultConfig(capital float64, timeframe string) Config {
+func DefaultConfig(capital float64) Config {
 	return Config{
 		Capital:       capital,
-		Timeframe:     timeframe,
 		WarmupBars:    100,
 		MaxWarmupBars: 300,
 	}
@@ -101,8 +99,12 @@ type Engine struct {
 	clientSideStops bool
 	pendingStops    []pendingStop
 
+	// baseTimeframe is the finest timeframe from the strategy's Timeframes(),
+	// used for provider subscriptions and warmup. Set at the start of Run().
+	baseTimeframe string
+
 	// Multi-timeframe bar aggregation. Non-nil when the strategy implements
-	// MultiTimeframeSubscriber and has higher timeframes beyond the base.
+	// strategy declares more than one timeframe.
 	aggregators []*BarAggregator
 
 	// warmingUp is true during recovery replay — orders are simulated locally
@@ -153,7 +155,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		log.Println("paper engine: calling ResolveSymbols...")
 		resolved, err := resolver.ResolveSymbols(strategy.InitContext{
 			Symbols:   symbols,
-			Timeframe: e.config.Timeframe,
+			Timeframe: e.baseTimeframe,
 			Config:    e.config.ConfigJSON,
 			Search:    search,
 			Discovery: discovery,
@@ -169,25 +171,27 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		return fmt.Errorf("no symbols to trade — pass --symbols or implement SymbolResolver")
 	}
 
-	// If the strategy wants multiple timeframes, set up aggregation.
-	// The engine subscribes at the finest timeframe and builds higher bars locally.
-	if mts, ok := e.strategy.(strategy.MultiTimeframeSubscriber); ok {
-		timeframes := mts.Timeframes()
-		if len(timeframes) > 1 {
-			sorted, err := SortTimeframes(timeframes)
-			if err != nil {
-				return fmt.Errorf("multi-timeframe setup: %w", err)
-			}
-			e.config.Timeframe = sorted[0]
-			for _, tf := range sorted[1:] {
-				dur, _ := ParseTimeframe(tf) // already validated by SortTimeframes
-				agg := NewBarAggregator(tf, dur, func(timeframe string, tick strategy.Tick) {
-					e.onBar(timeframe, tick)
-				})
-				e.aggregators = append(e.aggregators, agg)
-			}
-			log.Printf("paper engine: multi-timeframe active | base=%s higher=%v", sorted[0], sorted[1:])
+	// Read timeframes from the strategy (single source of truth).
+	timeframes := e.strategy.Timeframes()
+	if len(timeframes) == 0 {
+		return fmt.Errorf("strategy Timeframes() must return at least one timeframe")
+	}
+	sorted, err := SortTimeframes(timeframes)
+	if err != nil {
+		return fmt.Errorf("invalid timeframes from strategy: %w", err)
+	}
+	e.baseTimeframe = sorted[0]
+
+	// Set up aggregators for higher timeframes (if any).
+	if len(sorted) > 1 {
+		for _, tf := range sorted[1:] {
+			dur, _ := ParseTimeframe(tf) // already validated by SortTimeframes
+			agg := NewBarAggregator(tf, dur, func(timeframe string, tick strategy.Tick) {
+				e.handleBar(timeframe, tick)
+			})
+			e.aggregators = append(e.aggregators, agg)
 		}
+		log.Printf("paper engine: multi-timeframe active | base=%s higher=%v", sorted[0], sorted[1:])
 	}
 
 	// Seed portfolio and warm up strategy indicators from account state + recent history.
@@ -200,7 +204,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		log.Println("paper engine: calling OnInit...")
 		if err := init.OnInit(strategy.InitContext{
 			Symbols:    symbols,
-			Timeframe:  e.config.Timeframe,
+			Timeframe:  e.baseTimeframe,
 			Config:     e.config.ConfigJSON,
 			Search:     search,
 			Discovery:  discovery,
@@ -306,10 +310,10 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 
 	go e.processLoop(ctx)
 
-	log.Printf("paper engine: connecting to bar stream | symbols=%v timeframe=%s", symbols, e.config.Timeframe)
+	log.Printf("paper engine: connecting to bar stream | symbols=%v timeframe=%s", symbols, e.baseTimeframe)
 
 	// SubscribeBars blocks until ctx is cancelled — this is the main run loop.
-	return e.md.SubscribeBars(ctx, symbols, e.config.Timeframe, func(b provider.Bar) {
+	return e.md.SubscribeBars(ctx, symbols, e.baseTimeframe, func(b provider.Bar) {
 		e.send(ctx, tickEvent{tick: provider.BarToTick(b)})
 	})
 }
@@ -333,7 +337,7 @@ func (e *Engine) processLoop(ctx context.Context) {
 		case ev := <-e.eventCh:
 			switch v := ev.(type) {
 			case tickEvent:
-				e.onTick(v.tick)
+				e.handleBar(e.baseTimeframe, v.tick)
 			case tradeEvent:
 				e.onTrade(v.trade)
 			case fillEvent:
@@ -349,26 +353,21 @@ func (e *Engine) processLoop(ctx context.Context) {
 	}
 }
 
-func (e *Engine) onTick(tick strategy.Tick) {
+func (e *Engine) handleBar(timeframe string, tick strategy.Tick) {
 	e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
-	e.checkStops(tick.Symbol, tick.Close)
-	e.submitOrders(e.strategy.OnTick(tick, e.portfolio))
-
-	// Feed through aggregators — completed higher-timeframe bars call onBar inline.
-	for _, agg := range e.aggregators {
-		agg.Update(tick)
-	}
-}
-
-func (e *Engine) onBar(timeframe string, tick strategy.Tick) {
-	e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
-	mts := e.strategy.(strategy.MultiTimeframeSubscriber)
-	orders := mts.OnBar(timeframe, tick, e.portfolio)
+	orders := e.strategy.OnBar(timeframe, tick, e.portfolio)
 	if e.warmingUp {
 		simulateFills(e.strategy, e.portfolio, orders, tick)
 	} else {
 		e.checkStops(tick.Symbol, tick.Close)
 		e.submitOrders(orders)
+	}
+
+	// Only feed base timeframe bars through aggregators.
+	if timeframe == e.baseTimeframe {
+		for _, agg := range e.aggregators {
+			agg.Update(tick)
+		}
 	}
 }
 
@@ -565,7 +564,7 @@ func (e *Engine) addSymbols(symbols ...string) {
 
 	// Subscribe to bars for new symbols.
 	go func() {
-		if err := e.md.SubscribeBars(e.ctx, symbols, e.config.Timeframe, func(b provider.Bar) {
+		if err := e.md.SubscribeBars(e.ctx, symbols, e.baseTimeframe, func(b provider.Bar) {
 			e.send(e.ctx, tickEvent{tick: provider.BarToTick(b)})
 		}); err != nil && e.ctx.Err() == nil {
 			log.Printf("paper engine: dynamic bar subscription error for %v: %v", symbols, err)
