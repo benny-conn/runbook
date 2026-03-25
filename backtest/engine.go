@@ -200,7 +200,7 @@ func precomputeDayPrices(ticks []strategy.Tick) []dayPrices {
 	var current *dayPrices
 
 	for _, tick := range ticks {
-		date := tick.Timestamp.Format("2006-01-02")
+		date := tick.Timestamp.UTC().Format("2006-01-02")
 		if current == nil || current.date != date {
 			if current != nil {
 				days = append(days, *current)
@@ -304,7 +304,7 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		// Update market prices so Equity() stays accurate.
 		e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
 
-		date := tick.Timestamp.Format("2006-01-02")
+		date := tick.Timestamp.UTC().Format("2006-01-02")
 
 		// --- Day boundary handling for strategies with lifecycle hooks ---
 		if hasDailyHooks && date != currentDate {

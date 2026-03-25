@@ -92,7 +92,7 @@ func main() {
 	if *toFlag == "" {
 		to = now.Add(24*time.Hour - time.Second)
 	} else {
-		to, err = time.Parse("2006-01-02", *toFlag)
+		to, err = time.ParseInLocation("2006-01-02", *toFlag, time.UTC)
 		if err != nil {
 			log.Fatalf("invalid --to date: %v", err)
 		}
@@ -103,7 +103,7 @@ func main() {
 		dur := backtest.DefaultDuration(baseTimeframe)
 		from = to.Add(-dur)
 	} else {
-		from, err = time.Parse("2006-01-02", *fromFlag)
+		from, err = time.ParseInLocation("2006-01-02", *fromFlag, time.UTC)
 		if err != nil {
 			log.Fatalf("invalid --from date: %v", err)
 		}

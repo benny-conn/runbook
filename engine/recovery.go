@@ -83,7 +83,7 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 
 		for _, b := range bars {
 			tick := provider.BarToTick(b)
-			date := tick.Timestamp.Format("2006-01-02")
+			date := tick.Timestamp.UTC().Format("2006-01-02")
 
 			// Fire daily lifecycle hooks at day boundaries.
 			if hasDailyHooks && date != currentDate {

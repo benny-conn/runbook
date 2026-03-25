@@ -297,6 +297,8 @@ func (s *ScriptStrategy) OnBar(timeframe string, tick strategy.Tick, portfolio s
 	tickVal := s.vm.ToValue(map[string]interface{}{
 		"symbol":    tick.Symbol,
 		"timestamp": tick.Timestamp.UnixMilli(),
+		"date":      tick.Timestamp.UTC().Format("2006-01-02"),
+		"time":      tick.Timestamp.UTC().Format("15:04"),
 		"open":      tick.Open,
 		"high":      tick.High,
 		"low":       tick.Low,
