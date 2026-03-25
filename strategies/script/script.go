@@ -42,6 +42,8 @@ type ScriptStrategy struct {
 	onMarketClose  goja.Callable
 	onExit         goja.Callable
 	resolveSymbols goja.Callable
+	onBar          goja.Callable
+	timeframesFn   goja.Callable
 	name           string
 	runtimeErrors  []string
 	errorSeen      map[string]bool
@@ -214,6 +216,8 @@ func New(name, src string, config map[string]string, opts ...Option) (*ScriptStr
 		onMarketClose:  extractOptional("onMarketClose"),
 		onExit:         extractOptional("onExit"),
 		resolveSymbols: extractOptional("resolveSymbols"),
+		onBar:          extractOptional("onBar"),
+		timeframesFn:   extractOptional("timeframes"),
 		name:           name,
 		errorSeen:      make(map[string]bool),
 		dataGlobal:     dg,
@@ -275,6 +279,82 @@ func (s *ScriptStrategy) OnTick(tick strategy.Tick, portfolio strategy.Portfolio
 	}
 
 	return s.parseOrders(result)
+}
+
+// ---------------------------------------------------------------------------
+// strategy.MultiTimeframeSubscriber (optional)
+// ---------------------------------------------------------------------------
+
+// Timeframes implements strategy.MultiTimeframeSubscriber.
+// Returns the timeframes declared by the JS timeframes() function.
+func (s *ScriptStrategy) Timeframes() []string {
+	if s.timeframesFn == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result, err := s.timeframesFn(goja.Undefined())
+	if err != nil {
+		msg := fmt.Sprintf("script timeframes() error: %v", err)
+		fmt.Println(msg)
+		s.trackError(msg)
+		return nil
+	}
+
+	exported := result.Export()
+	arr, ok := exported.([]interface{})
+	if !ok {
+		return nil
+	}
+	timeframes := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if str, ok := v.(string); ok && str != "" {
+			timeframes = append(timeframes, str)
+		}
+	}
+	return timeframes
+}
+
+// OnBar implements strategy.MultiTimeframeSubscriber.
+// Called when a higher-timeframe bar completes.
+func (s *ScriptStrategy) OnBar(timeframe string, tick strategy.Tick, portfolio strategy.Portfolio) []strategy.Order {
+	if s.onBar == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.dataGlobal != nil {
+		s.dataGlobal.resetTickCount()
+	}
+
+	tickVal := s.vm.ToValue(map[string]interface{}{
+		"symbol":    tick.Symbol,
+		"timestamp": tick.Timestamp.UnixMilli(),
+		"open":      tick.Open,
+		"high":      tick.High,
+		"low":       tick.Low,
+		"close":     tick.Close,
+		"volume":    tick.Volume,
+	})
+
+	portfolioVal := s.makePortfolioObj(portfolio)
+
+	result, err := s.onBar(goja.Undefined(), s.vm.ToValue(timeframe), tickVal, portfolioVal)
+	if err != nil {
+		msg := fmt.Sprintf("script onBar error: %v", err)
+		fmt.Println(msg)
+		s.trackError(msg)
+		return nil
+	}
+
+	return s.parseOrders(result)
+}
+
+// HasMultiTimeframe returns true if the script exports both timeframes and onBar.
+func (s *ScriptStrategy) HasMultiTimeframe() bool {
+	return s.timeframesFn != nil && s.onBar != nil
 }
 
 // OnFill implements strategy.Strategy.
