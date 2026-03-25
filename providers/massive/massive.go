@@ -19,6 +19,7 @@ import (
 	"github.com/massive-com/client-go/v3/websocket/models"
 
 	"github.com/benny-conn/brandon-bot/provider"
+	"github.com/benny-conn/brandon-bot/strategy"
 )
 
 // Config holds Massive provider credentials and settings.
@@ -348,6 +349,81 @@ func (p *Provider) SubscribeQuotes(ctx context.Context, symbols []string, handle
 			}
 		}
 	}
+}
+
+// — AssetSearch —
+
+// SearchAssets implements strategy.AssetSearch using Massive's ticker listing API.
+// Supports server-side text search on ticker symbol and company name.
+func (p *Provider) SearchAssets(ctx context.Context, query strategy.AssetQuery) ([]strategy.Asset, error) {
+	params := &gen.ListTickersParams{}
+
+	if query.Text != "" {
+		params.Search = &query.Text
+	}
+	if query.Exchange != "" {
+		params.Exchange = &query.Exchange
+	}
+	if query.AssetClass != "" {
+		market := gen.ListTickersParamsMarket(query.AssetClass)
+		params.Market = &market
+	}
+
+	active := true
+	if query.Status == "inactive" || query.Status == "delisted" {
+		active = false
+	}
+	params.Active = &active
+
+	limit := query.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	params.Limit = &limit
+
+	resp, err := p.client.ListTickersWithResponse(ctx, params)
+	if err != nil {
+		return nil, fmt.Errorf("massive search assets: %w", err)
+	}
+	if err := rest.CheckResponse(resp); err != nil {
+		return nil, fmt.Errorf("massive search assets: %w", err)
+	}
+
+	if resp.JSON200 == nil || resp.JSON200.Results == nil {
+		return nil, nil
+	}
+
+	results := *resp.JSON200.Results
+	assets := make([]strategy.Asset, 0, len(results))
+	for _, t := range results {
+		exchange := ""
+		if t.PrimaryExchange != nil {
+			exchange = *t.PrimaryExchange
+		}
+		tradable := true
+		if t.Active != nil {
+			tradable = *t.Active
+		}
+		extra := map[string]any{
+			"market": string(t.Market),
+			"locale": string(t.Locale),
+		}
+		if t.Type != nil {
+			extra["type"] = *t.Type
+		}
+		assets = append(assets, strategy.Asset{
+			Symbol:     t.Ticker,
+			Name:       t.Name,
+			AssetClass: string(t.Market),
+			Exchange:   exchange,
+			Tradable:   tradable,
+			Extra:      extra,
+		})
+	}
+	return assets, nil
 }
 
 // parseTimeframe converts canonical timeframe strings to Massive API parameters.

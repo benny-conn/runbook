@@ -350,6 +350,18 @@ func (s *ScriptStrategy) ResolveSymbols(ctx strategy.InitContext) ([]string, err
 	arg.Set("symbols", ctx.Symbols)
 	arg.Set("timeframe", ctx.Timeframe)
 
+	if ctx.Search != nil {
+		arg.Set("searchAssets", func(call goja.FunctionCall) goja.Value {
+			query := parseAssetQuery(s.vm, call)
+			assets, err := ctx.Search.SearchAssets(context.Background(), query)
+			if err != nil {
+				panic(s.vm.NewGoError(err))
+			}
+			return s.vm.ToValue(assetsToJS(assets))
+		})
+	}
+
+	// Legacy: keep listMarkets for backward compat with existing Kalshi scripts.
 	if ctx.Discovery != nil {
 		arg.Set("listMarkets", func(call goja.FunctionCall) goja.Value {
 			opts := parseMarketListOpts(s.vm, call)
@@ -389,7 +401,19 @@ func (s *ScriptStrategy) OnInit(ctx strategy.InitContext) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Register kalshi global if provider supports market discovery.
+	// Register searchAssets global if provider supports asset search.
+	if ctx.Search != nil {
+		s.vm.Set("searchAssets", func(call goja.FunctionCall) goja.Value {
+			query := parseAssetQuery(s.vm, call)
+			assets, err := ctx.Search.SearchAssets(context.Background(), query)
+			if err != nil {
+				panic(s.vm.NewGoError(err))
+			}
+			return s.vm.ToValue(assetsToJS(assets))
+		})
+	}
+
+	// Legacy: register kalshi global if provider supports market discovery.
 	if ctx.Discovery != nil {
 		kalshiObj := s.vm.NewObject()
 		kalshiObj.Set("listMarkets", func(call goja.FunctionCall) goja.Value {
@@ -639,6 +663,59 @@ func parseMarketListOpts(vm *goja.Runtime, call goja.FunctionCall) strategy.Mark
 		opts.MinVolume = int(v.ToInteger())
 	}
 	return opts
+}
+
+// parseAssetQuery extracts an AssetQuery from a JS function call.
+// Accepts a string (text search shorthand) or an options object.
+func parseAssetQuery(vm *goja.Runtime, call goja.FunctionCall) strategy.AssetQuery {
+	query := strategy.AssetQuery{}
+	if len(call.Arguments) == 0 || goja.IsUndefined(call.Argument(0)) {
+		return query
+	}
+
+	arg := call.Argument(0)
+	// Shorthand: bare string means text search.
+	if s, ok := arg.Export().(string); ok {
+		query.Text = s
+		return query
+	}
+
+	obj := arg.ToObject(vm)
+	if v := obj.Get("text"); v != nil && !goja.IsUndefined(v) {
+		query.Text = v.String()
+	}
+	if v := obj.Get("assetClass"); v != nil && !goja.IsUndefined(v) {
+		query.AssetClass = v.String()
+	}
+	if v := obj.Get("exchange"); v != nil && !goja.IsUndefined(v) {
+		query.Exchange = v.String()
+	}
+	if v := obj.Get("status"); v != nil && !goja.IsUndefined(v) {
+		query.Status = v.String()
+	}
+	if v := obj.Get("limit"); v != nil && !goja.IsUndefined(v) {
+		query.Limit = int(v.ToInteger())
+	}
+	return query
+}
+
+// assetsToJS converts assets into a JS-friendly slice of maps.
+func assetsToJS(assets []strategy.Asset) []interface{} {
+	result := make([]interface{}, len(assets))
+	for i, a := range assets {
+		m := map[string]interface{}{
+			"symbol":     a.Symbol,
+			"name":       a.Name,
+			"assetClass": a.AssetClass,
+			"exchange":   a.Exchange,
+			"tradable":   a.Tradable,
+		}
+		if a.Extra != nil {
+			m["extra"] = a.Extra
+		}
+		result[i] = m
+	}
+	return result
 }
 
 // marketsToJS converts discovered markets into a JS-friendly slice of maps.

@@ -122,11 +122,21 @@ func NewEngine(strat strategy.Strategy, md provider.MarketData, exec provider.Ex
 func (e *Engine) Run(ctx context.Context, symbols []string) error {
 	e.ctx = ctx
 
-	// Check if the provider supports market discovery (e.g. Kalshi market listing).
+	// Check if providers support asset search or legacy market discovery.
+	var search strategy.AssetSearch
+	if s, ok := e.md.(strategy.AssetSearch); ok {
+		search = s
+	} else if s, ok := e.exec.(strategy.AssetSearch); ok {
+		search = s
+	}
+	if search != nil {
+		log.Println("paper engine: provider supports asset search")
+	}
+
 	var discovery strategy.MarketDiscovery
 	if md, ok := e.md.(strategy.MarketDiscovery); ok {
 		discovery = md
-		log.Println("paper engine: provider supports market discovery")
+		log.Println("paper engine: provider supports market discovery (legacy)")
 	}
 
 	// If the strategy implements SymbolResolver, let it discover/choose symbols.
@@ -137,6 +147,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 			Symbols:   symbols,
 			Timeframe: e.config.Timeframe,
 			Config:    e.config.ConfigJSON,
+			Search:    search,
 			Discovery: discovery,
 		})
 		if err != nil {
@@ -162,6 +173,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 			Symbols:    symbols,
 			Timeframe:  e.config.Timeframe,
 			Config:     e.config.ConfigJSON,
+			Search:     search,
 			Discovery:  discovery,
 			AddSymbols: e.addSymbols,
 		}); err != nil {

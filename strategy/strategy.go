@@ -120,8 +120,12 @@ type InitContext struct {
 	Timeframe string
 	Config    []byte // raw JSON config (nil if none)
 
-	// Discovery provides market listing capabilities if the provider supports it
-	// (e.g. Kalshi's market catalog). Nil if the provider doesn't implement MarketDiscovery.
+	// Search provides asset/symbol discovery if the provider supports it.
+	// Nil if the provider doesn't implement AssetSearch.
+	Search AssetSearch
+
+	// Discovery provides market listing capabilities if the provider supports it.
+	// Deprecated: Use Search instead. Kept for backward compatibility.
 	Discovery MarketDiscovery
 
 	// AddSymbols dynamically subscribes to new symbols mid-run. Call from OnTick,
@@ -166,6 +170,35 @@ type SymbolResolver interface {
 	ResolveSymbols(ctx InitContext) ([]string, error)
 }
 
+// AssetQuery controls filtering for SearchAssets.
+type AssetQuery struct {
+	Text       string // free-text search (e.g. "Apple", "AAPL", "Bitcoin")
+	AssetClass string // "us_equity", "crypto", "prediction", "forex", etc.
+	Exchange   string // "XNAS", "XNYS", etc.
+	Status     string // "active", "open" — provider normalizes
+	Limit      int    // max results (0 = provider default)
+}
+
+// Asset represents a tradeable asset returned by AssetSearch.
+type Asset struct {
+	Symbol     string         // ticker symbol
+	Name       string         // display name (company name, market title, etc.)
+	AssetClass string         // "us_equity", "crypto", "prediction", etc.
+	Exchange   string         // primary exchange
+	Tradable   bool           // actively tradeable
+	Extra      map[string]any // provider-specific fields
+}
+
+// AssetSearch is an optional interface a provider can implement to expose
+// asset/symbol discovery and search capabilities. Strategies use this to
+// dynamically find symbols to trade.
+type AssetSearch interface {
+	SearchAssets(ctx context.Context, query AssetQuery) ([]Asset, error)
+}
+
+// Deprecated: Use AssetSearch instead. Kept for backward compatibility with
+// existing Kalshi scripts that call listMarkets().
+
 // DiscoveredMarket represents a tradeable market returned by MarketDiscovery.
 type DiscoveredMarket struct {
 	Ticker       string
@@ -189,8 +222,8 @@ type MarketListOptions struct {
 }
 
 // MarketDiscovery is an optional interface a provider can implement to expose
-// market listing and discovery capabilities. Prediction market providers like
-// Kalshi implement this so strategies can find active markets to trade.
+// market listing and discovery capabilities.
+// Deprecated: Implement AssetSearch instead.
 type MarketDiscovery interface {
 	ListMarkets(ctx context.Context, opts MarketListOptions) ([]DiscoveredMarket, error)
 }

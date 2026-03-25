@@ -713,6 +713,51 @@ func (p *Provider) ListMarkets(ctx context.Context, opts strategy.MarketListOpti
 	return result, nil
 }
 
+// — AssetSearch —
+
+// SearchAssets implements strategy.AssetSearch by wrapping ListMarkets.
+func (p *Provider) SearchAssets(ctx context.Context, query strategy.AssetQuery) ([]strategy.Asset, error) {
+	opts := strategy.MarketListOptions{
+		Status: query.Status,
+		Limit:  query.Limit,
+	}
+	if opts.Status == "" {
+		opts.Status = "open"
+	}
+
+	markets, err := p.ListMarkets(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	textLower := strings.ToLower(query.Text)
+	result := make([]strategy.Asset, 0, len(markets))
+	for _, m := range markets {
+		if textLower != "" &&
+			!strings.Contains(strings.ToLower(m.Title), textLower) &&
+			!strings.Contains(strings.ToLower(m.Ticker), textLower) {
+			continue
+		}
+		result = append(result, strategy.Asset{
+			Symbol:     m.Ticker,
+			Name:       m.Title,
+			AssetClass: "prediction",
+			Exchange:   "kalshi",
+			Tradable:   m.Status == "open",
+			Extra: map[string]any{
+				"eventTicker":  m.EventTicker,
+				"seriesTicker": m.SeriesTicker,
+				"volume":       m.Volume,
+				"volume24h":    m.Volume24H,
+				"openTime":     m.OpenTime.UnixMilli(),
+				"closeTime":    m.CloseTime.UnixMilli(),
+				"status":       m.Status,
+			},
+		})
+	}
+	return result, nil
+}
+
 // — Helpers —
 
 func envOr(val, envKey string) string {

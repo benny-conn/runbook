@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -322,6 +323,52 @@ func (p *Provider) GetOpenOrders(ctx context.Context) ([]provider.OpenOrder, err
 			OrderType:  string(o.Type),
 			LimitPrice: limitPrice,
 			StopPrice:  stopPrice,
+		}
+	}
+	return result, nil
+}
+
+// — AssetSearch —
+
+// SearchAssets implements strategy.AssetSearch using Alpaca's asset listing API.
+// Note: Alpaca doesn't support server-side text search, so text filtering is
+// done client-side after fetching all matching assets.
+func (p *Provider) SearchAssets(ctx context.Context, query strategy.AssetQuery) ([]strategy.Asset, error) {
+	req := alp.GetAssetsRequest{
+		Status:     query.Status,
+		AssetClass: query.AssetClass,
+		Exchange:   query.Exchange,
+	}
+	if req.Status == "" {
+		req.Status = "active"
+	}
+
+	assets, err := p.trading.GetAssets(req)
+	if err != nil {
+		return nil, fmt.Errorf("alpaca search assets: %w", err)
+	}
+
+	textLower := strings.ToLower(query.Text)
+	result := make([]strategy.Asset, 0)
+	for _, a := range assets {
+		if textLower != "" && !strings.Contains(strings.ToLower(a.Symbol), textLower) &&
+			!strings.Contains(strings.ToLower(a.Name), textLower) {
+			continue
+		}
+		result = append(result, strategy.Asset{
+			Symbol:     a.Symbol,
+			Name:       a.Name,
+			AssetClass: string(a.Class),
+			Exchange:   a.Exchange,
+			Tradable:   a.Tradable,
+			Extra: map[string]any{
+				"fractionable": a.Fractionable,
+				"shortable":    a.Shortable,
+				"marginable":   a.Marginable,
+			},
+		})
+		if query.Limit > 0 && len(result) >= query.Limit {
+			break
 		}
 	}
 	return result, nil
