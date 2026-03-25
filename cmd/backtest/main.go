@@ -5,7 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	massiveprovider "github.com/benny-conn/brandon-bot/providers/massive"
 	topstepxprovider "github.com/benny-conn/brandon-bot/providers/topstepx"
 	"github.com/benny-conn/brandon-bot/strategies"
+	"github.com/benny-conn/brandon-bot/strategies/script"
 	"github.com/benny-conn/brandon-bot/strategy"
 )
 
@@ -30,6 +33,7 @@ func main() {
 	capital := flag.Float64("capital", 10000, "starting capital in USD")
 	feedFlag := flag.String("feed", "iex", "Alpaca feed: iex or sip")
 	dataProviderFlag := flag.String("data-provider", "alpaca", "market data provider: alpaca, massive, coinbase, or kalshi")
+	scriptFlag := flag.String("script", "", "path to a .js script file (required when --strategy=script)")
 	configFlag := flag.String("config", "", "path to JSON config file for the strategy")
 	flag.Parse()
 
@@ -64,24 +68,36 @@ func main() {
 		symbols[i] = strings.TrimSpace(strings.ToUpper(s))
 	}
 
-	strat, err := resolveStrategy(*stratName)
-	if err != nil {
-		log.Fatalf("unknown strategy %q: %v", *stratName, err)
-	}
-
+	var strategyCfg json.RawMessage
 	if *configFlag != "" {
-		cs, ok := strat.(strategy.Configurable)
-		if !ok {
-			log.Fatalf("strategy %q does not support --config (does not implement Configurable)", *stratName)
-		}
 		data, err := os.ReadFile(*configFlag)
 		if err != nil {
 			log.Fatalf("reading config file: %v", err)
 		}
-		if err := cs.Configure(data); err != nil {
-			log.Fatalf("configuring strategy: %v", err)
+		var wrapper struct {
+			Strategy json.RawMessage `json:"strategy"`
+		}
+		if err := json.Unmarshal(data, &wrapper); err != nil {
+			// Treat the whole file as strategy config.
+			strategyCfg = data
+		} else if len(wrapper.Strategy) > 0 {
+			strategyCfg = wrapper.Strategy
+		} else {
+			strategyCfg = data
 		}
 		fmt.Printf("Loaded config from %s\n", *configFlag)
+	}
+
+	strat, err := resolveStrategy(*stratName, *scriptFlag, strategyCfg)
+	if err != nil {
+		log.Fatalf("unknown strategy %q: %v", *stratName, err)
+	}
+	if len(strategyCfg) > 0 {
+		if c, ok := strat.(strategy.Configurable); ok {
+			if err := c.Configure(strategyCfg); err != nil {
+				log.Fatalf("configuring strategy: %v", err)
+			}
+		}
 	}
 
 	fmt.Printf("Fetching %s bars for %s from %s to %s (provider=%s)...\n",
@@ -148,13 +164,37 @@ func main() {
 	fmt.Printf("\nRun saved to database (id=%d)\n", runID)
 }
 
-func resolveStrategy(name string) (strategy.Strategy, error) {
+func resolveStrategy(name, scriptPath string, strategyCfg json.RawMessage) (strategy.Strategy, error) {
 	switch name {
 	case "ma_crossover":
 		return strategies.NewMACrossover(), nil
 	case "rsi_pullback":
 		return strategies.NewRSIPullback(), nil
+	case "script":
+		if scriptPath == "" {
+			return nil, fmt.Errorf("--script flag is required when using --strategy=script")
+		}
+		src, err := os.ReadFile(scriptPath)
+		if err != nil {
+			return nil, fmt.Errorf("reading script %q: %w", scriptPath, err)
+		}
+		cfg := make(map[string]string)
+		if len(strategyCfg) > 0 {
+			var raw map[string]interface{}
+			if err := json.Unmarshal(strategyCfg, &raw); err != nil {
+				return nil, fmt.Errorf("parsing strategy config: %w", err)
+			}
+			for k, v := range raw {
+				cfg[k] = fmt.Sprint(v)
+			}
+		}
+		scriptName := strings.TrimSuffix(filepath.Base(scriptPath), filepath.Ext(scriptPath))
+		log.Printf("script strategy config: script=%s name=%s", scriptPath, scriptName)
+		for k, v := range cfg {
+			log.Printf("  %s=%s", k, v)
+		}
+		return script.New(scriptName, string(src), cfg)
 	default:
-		return nil, fmt.Errorf("available strategies: ma_crossover, rsi_pullback, five_min_orb")
+		return nil, fmt.Errorf("available strategies: ma_crossover, rsi_pullback, script")
 	}
 }
