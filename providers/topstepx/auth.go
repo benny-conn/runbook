@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -19,6 +20,10 @@ type authClient struct {
 
 	mu    sync.RWMutex
 	token string
+
+	// Callbacks notified on successful token refresh.
+	listenersMu sync.Mutex
+	listeners   []func()
 }
 
 type authCreds struct {
@@ -68,22 +73,65 @@ func (a *authClient) authenticate() error {
 	return nil
 }
 
-// startRenewal re-authenticates every 23 hours (tokens expire after ~24h).
+// onRefresh registers a callback invoked after each successful token renewal.
+// Used by managedHub to force reconnection with the new token.
+func (a *authClient) onRefresh(fn func()) {
+	a.listenersMu.Lock()
+	defer a.listenersMu.Unlock()
+	a.listeners = append(a.listeners, fn)
+}
+
+func (a *authClient) notifyRefresh() {
+	a.listenersMu.Lock()
+	fns := make([]func(), len(a.listeners))
+	copy(fns, a.listeners)
+	a.listenersMu.Unlock()
+
+	for _, fn := range fns {
+		fn()
+	}
+}
+
+// startRenewal re-authenticates every 20 hours (tokens expire after ~24h).
+// On failure, retries with backoff up to 5 times before logging a critical error.
 func (a *authClient) startRenewal(ctx context.Context) {
 	go func() {
-		t := time.NewTicker(23 * time.Hour)
+		t := time.NewTicker(20 * time.Hour)
 		defer t.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if err := a.authenticate(); err != nil {
-					fmt.Printf("topstepx: token renewal failed: %v\n", err)
-				}
+				a.renewWithRetry(ctx)
 			}
 		}
 	}()
+}
+
+func (a *authClient) renewWithRetry(ctx context.Context) {
+	backoffs := []time.Duration{30 * time.Second, 60 * time.Second, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute}
+
+	for attempt := 0; attempt <= len(backoffs); attempt++ {
+		if err := a.authenticate(); err != nil {
+			if attempt < len(backoffs) {
+				log.Printf("topstepx: token renewal failed (attempt %d/%d): %v — retrying in %s",
+					attempt+1, len(backoffs)+1, err, backoffs[attempt])
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoffs[attempt]):
+				}
+				continue
+			}
+			log.Printf("topstepx: CRITICAL — token renewal exhausted all retries: %v", err)
+			return
+		}
+
+		log.Println("topstepx: token renewed successfully")
+		a.notifyRefresh()
+		return
+	}
 }
 
 func (a *authClient) getToken() string {

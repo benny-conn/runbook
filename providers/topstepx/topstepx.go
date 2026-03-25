@@ -18,10 +18,11 @@ import (
 	"github.com/benny-conn/brandon-bot/strategy"
 )
 
-// Config holds TopstepX API credentials.
+// Config holds TopstepX API credentials and optional account selection.
 type Config struct {
-	Username string `json:"username"`
-	APIKey   string `json:"api_key"`
+	Username  string `json:"username"`
+	APIKey    string `json:"api_key"`
+	AccountID int64  `json:"account_id,omitempty"` // optional: skip auto-select
 }
 
 // Provider implements provider.MarketData and provider.Execution using TopstepX.
@@ -32,14 +33,26 @@ type Provider struct {
 	// contract cache: symbol → contract info
 	contractMu sync.RWMutex
 	contracts  map[string]*contractInfo
+
+	// Shared hub connections — lazily initialized, auto-reconnecting.
+	hubMu     sync.Mutex
+	marketHub *managedHub
+	userHub   *managedHub
 }
 
 type contractInfo struct {
-	ID        int64   // numeric ID used for history/bars
-	StringID  string  // e.g. "CON.F.US.EP.U25" used for orders
+	ID        string  // e.g. "CON.F.US.EP.M26" — used for all API calls
 	Symbol    string  // user-facing symbol e.g. "ES", "NQ"
 	TickSize  float64
 	TickValue float64
+}
+
+// AccountInfo describes a TopstepX trading account.
+type AccountInfo struct {
+	ID       int64
+	Name     string
+	Balance  float64
+	CanTrade bool
 }
 
 func envOr(val, envKey string) string {
@@ -57,20 +70,55 @@ func New(cfg Config) *Provider {
 	}
 	return &Provider{
 		auth:      newAuthClient(creds),
+		accountID: cfg.AccountID,
 		contracts: make(map[string]*contractInfo),
 	}
 }
 
+// Close shuts down shared hub connections.
+func (p *Provider) Close() {
+	p.hubMu.Lock()
+	defer p.hubMu.Unlock()
+	if p.marketHub != nil {
+		p.marketHub.close()
+	}
+	if p.userHub != nil {
+		p.userHub.close()
+	}
+}
+
 // ensureConnected authenticates and resolves the account on first use.
+// If accountID was set via Config or SetAccount, it skips auto-selection.
 func (p *Provider) ensureConnected(ctx context.Context) error {
-	if p.accountID != 0 {
-		return nil
+	if p.auth.getToken() != "" {
+		return nil // already authenticated
 	}
 	if err := p.auth.authenticate(); err != nil {
 		return err
 	}
 	p.auth.startRenewal(ctx)
 
+	// Register token-refresh handler to force hub reconnections.
+	p.auth.onRefresh(func() {
+		p.hubMu.Lock()
+		defer p.hubMu.Unlock()
+		// Close current connections; managedHub.run() will reconnect with new token.
+		if p.marketHub != nil && p.marketHub.current != nil {
+			p.marketHub.current.Close()
+		}
+		if p.userHub != nil && p.userHub.current != nil {
+			p.userHub.current.Close()
+		}
+		log.Println("topstepx: token refreshed — hub reconnection triggered")
+	})
+
+	// If account was pre-selected via config or SetAccount, keep it.
+	if p.accountID != 0 {
+		log.Printf("topstepx: authenticated — using configured account id=%d", p.accountID)
+		return nil
+	}
+
+	// Auto-select first active account.
 	var resp struct {
 		Accounts []struct {
 			ID       int64  `json:"id"`
@@ -86,9 +134,85 @@ func (p *Provider) ensureConnected(ctx context.Context) error {
 		return fmt.Errorf("topstepx: no active accounts found")
 	}
 	p.accountID = resp.Accounts[0].ID
-	log.Printf("topstepx: authenticated — account=%s (id=%d)", resp.Accounts[0].Name, p.accountID)
+	log.Printf("topstepx: authenticated — auto-selected account=%s (id=%d)", resp.Accounts[0].Name, p.accountID)
 	return nil
 }
+
+// Authenticate explicitly authenticates without selecting an account.
+// Useful for testing credentials before calling ListAccounts.
+func (p *Provider) Authenticate(ctx context.Context) error {
+	if err := p.auth.authenticate(); err != nil {
+		return err
+	}
+	p.auth.startRenewal(ctx)
+	return nil
+}
+
+// ListAccounts returns all active accounts for the authenticated user.
+func (p *Provider) ListAccounts(ctx context.Context) ([]AccountInfo, error) {
+	var resp struct {
+		Accounts []struct {
+			ID       int64   `json:"id"`
+			Name     string  `json:"name"`
+			Balance  float64 `json:"balance"`
+			CanTrade bool    `json:"canTrade"`
+		} `json:"accounts"`
+		Success bool `json:"success"`
+	}
+	if err := p.auth.doPost(ctx, "/Account/search", map[string]bool{"onlyActiveAccounts": true}, &resp); err != nil {
+		return nil, fmt.Errorf("topstepx list accounts: %w", err)
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("topstepx: account search failed")
+	}
+
+	accounts := make([]AccountInfo, len(resp.Accounts))
+	for i, a := range resp.Accounts {
+		accounts[i] = AccountInfo{
+			ID:       a.ID,
+			Name:     a.Name,
+			Balance:  a.Balance,
+			CanTrade: a.CanTrade,
+		}
+	}
+	return accounts, nil
+}
+
+// SetAccount selects a specific account by ID for all subsequent operations.
+func (p *Provider) SetAccount(accountID int64) {
+	p.accountID = accountID
+}
+
+// AccountID returns the currently selected account ID (0 if none selected).
+func (p *Provider) AccountID() int64 {
+	return p.accountID
+}
+
+// --- shared hub management ---
+
+// getMarketHub returns the shared market hub, starting it on first call.
+func (p *Provider) getMarketHub(ctx context.Context) *managedHub {
+	p.hubMu.Lock()
+	defer p.hubMu.Unlock()
+	if p.marketHub == nil {
+		p.marketHub = newManagedHub(marketHubURL, p.auth.getToken)
+		go p.marketHub.run(ctx)
+	}
+	return p.marketHub
+}
+
+// getUserHub returns the shared user hub, starting it on first call.
+func (p *Provider) getUserHub(ctx context.Context) *managedHub {
+	p.hubMu.Lock()
+	defer p.hubMu.Unlock()
+	if p.userHub == nil {
+		p.userHub = newManagedHub(userHubURL, p.auth.getToken)
+		go p.userHub.run(ctx)
+	}
+	return p.userHub
+}
+
+// --- contract resolution ---
 
 // resolveContract looks up a contract by symbol, caching the result.
 func (p *Provider) resolveContract(ctx context.Context, symbol string) (*contractInfo, error) {
@@ -101,8 +225,7 @@ func (p *Provider) resolveContract(ctx context.Context, symbol string) (*contrac
 
 	var resp struct {
 		Contracts []struct {
-			ID        int64   `json:"id"`
-			ContractID string `json:"contractId"` // string format e.g. "CON.F.US.ENQ.U25"
+			ID        string  `json:"id"`
 			Name      string  `json:"name"`
 			TickSize  float64 `json:"tickSize"`
 			TickValue float64 `json:"tickValue"`
@@ -121,7 +244,6 @@ func (p *Provider) resolveContract(ctx context.Context, symbol string) (*contrac
 
 	c := &contractInfo{
 		ID:        resp.Contracts[0].ID,
-		StringID:  resp.Contracts[0].ContractID,
 		Symbol:    symbol,
 		TickSize:  resp.Contracts[0].TickSize,
 		TickValue: resp.Contracts[0].TickValue,
@@ -134,8 +256,8 @@ func (p *Provider) resolveContract(ctx context.Context, symbol string) (*contrac
 	return c, nil
 }
 
-// symbolFromContractID returns the cached symbol for a numeric contract ID.
-func (p *Provider) symbolFromContractID(id int64) string {
+// symbolFromContractID returns the cached symbol for a contract ID string.
+func (p *Provider) symbolFromContractID(id string) string {
 	p.contractMu.RLock()
 	defer p.contractMu.RUnlock()
 	for _, c := range p.contracts {
@@ -146,19 +268,7 @@ func (p *Provider) symbolFromContractID(id int64) string {
 	return ""
 }
 
-// symbolFromStringID returns the cached symbol for a string contract ID.
-func (p *Provider) symbolFromStringID(sid string) string {
-	p.contractMu.RLock()
-	defer p.contractMu.RUnlock()
-	for _, c := range p.contracts {
-		if c.StringID == sid {
-			return c.Symbol
-		}
-	}
-	return ""
-}
-
-// — MarketData —
+// --- MarketData ---
 
 func (p *Provider) FetchBars(ctx context.Context, symbol, timeframe string, start, end time.Time) ([]provider.Bar, error) {
 	if err := p.ensureConnected(ctx); err != nil {
@@ -249,31 +359,107 @@ func (p *Provider) FetchBarsMulti(ctx context.Context, symbols []string, timefra
 	return all, nil
 }
 
-// SubscribeBars builds bars from GatewayQuote events on the market hub.
+// --- quote delta handling ---
+
+// gatewayQuote is the raw GatewayQuote payload from TopstepX.
+// Fields are pointers so we can distinguish absent (delta) from zero.
+type gatewayQuote struct {
+	LastPrice     *float64 `json:"lastPrice"`
+	BestBid       *float64 `json:"bestBid"`
+	BestAsk       *float64 `json:"bestAsk"`
+	Volume        *float64 `json:"volume"`
+	Open          *float64 `json:"open"`
+	High          *float64 `json:"high"`
+	Low           *float64 `json:"low"`
+	Change        *float64 `json:"change"`
+	ChangePercent *float64 `json:"changePercent"`
+	Timestamp     string   `json:"timestamp"`   // exchange time
+	LastUpdated   string   `json:"lastUpdated"` // server time
+}
+
+// quoteState tracks the last-known full state for a symbol, since TopstepX
+// sends delta updates that only include changed fields.
+type quoteState struct {
+	lastPrice float64
+	bestBid   float64
+	bestAsk   float64
+	volume    float64
+	timestamp time.Time
+}
+
+// merge applies a delta quote onto the current state.
+func (s *quoteState) merge(q *gatewayQuote) {
+	if q.LastPrice != nil {
+		s.lastPrice = *q.LastPrice
+	}
+	if q.BestBid != nil {
+		s.bestBid = *q.BestBid
+	}
+	if q.BestAsk != nil {
+		s.bestAsk = *q.BestAsk
+	}
+	if q.Volume != nil {
+		s.volume = *q.Volume
+	}
+	if q.Timestamp != "" {
+		if t, err := time.Parse(time.RFC3339Nano, q.Timestamp); err == nil {
+			s.timestamp = t
+		} else if t, err := time.Parse("2006-01-02T15:04:05.999999999+00:00", q.Timestamp); err == nil {
+			s.timestamp = t
+		}
+	}
+}
+
+// parseQuoteEvent extracts the contract ID and delta quote from a GatewayQuote message.
+func parseQuoteEvent(msg signalrMsg) (contractID string, q gatewayQuote, ok bool) {
+	if msg.Target != "GatewayQuote" || len(msg.Arguments) < 2 {
+		return "", gatewayQuote{}, false
+	}
+	if err := json.Unmarshal(msg.Arguments[0], &contractID); err != nil {
+		return "", gatewayQuote{}, false
+	}
+	if err := json.Unmarshal(msg.Arguments[1], &q); err != nil {
+		return "", gatewayQuote{}, false
+	}
+	return contractID, q, true
+}
+
+// --- streaming subscriptions (shared hub) ---
+
+// SubscribeBars builds bars from GatewayQuote events on the shared market hub.
 // TopstepX doesn't push completed bars natively, so we aggregate from quote ticks.
 func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timeframe string, handler func(provider.Bar)) error {
 	if err := p.ensureConnected(ctx); err != nil {
 		return err
 	}
 
-	hub, err := dialHub(ctx, marketHubURL, p.auth.getToken())
-	if err != nil {
-		return err
-	}
-	defer hub.Close()
+	hub := p.getMarketHub(ctx)
 
-	// Resolve contracts and subscribe to quotes for each symbol.
-	contractToSym := make(map[string]string) // stringID → symbol
+	// Build contract mapping and subscribe.
+	contractToSym := make(map[string]string)
 	for _, sym := range symbols {
 		contract, err := p.resolveContract(ctx, sym)
 		if err != nil {
 			return err
 		}
-		contractToSym[contract.StringID] = sym
-		if err := hub.Send(ctx, "SubscribeContractQuotes", contract.StringID); err != nil {
+		contractToSym[contract.ID] = sym
+		if err := hub.subscribe(ctx, "SubscribeContractQuotes", contract.ID); err != nil {
 			return fmt.Errorf("topstepx subscribeBars %s: %w", sym, err)
 		}
 	}
+
+	// Local event channel for this consumer.
+	ch := make(chan signalrMsg, 512)
+	handlerID := hub.addHandler(func(msg signalrMsg) {
+		if msg.Target != "GatewayQuote" {
+			return
+		}
+		select {
+		case ch <- msg:
+		default:
+		}
+	})
+	defer hub.removeHandler(handlerID)
 
 	log.Printf("topstepx: subscribed to bars for %v (timeframe=%s)", symbols, timeframe)
 
@@ -281,13 +467,14 @@ func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timefram
 	type barState struct {
 		open, high, low, close float64
 		volume                 float64
-		start                  time.Time
 		hasData                bool
 	}
 	interval := barInterval(timeframe)
 	barStates := make(map[string]*barState)
+	quoteStates := make(map[string]*quoteState)
 	for _, sym := range symbols {
 		barStates[sym] = &barState{}
+		quoteStates[sym] = &quoteState{}
 	}
 
 	ticker := time.NewTicker(interval)
@@ -299,15 +486,17 @@ func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timefram
 			return nil
 
 		case <-ticker.C:
-			// Emit completed bars.
-			now := time.Now().UTC()
 			for sym, bs := range barStates {
 				if !bs.hasData {
 					continue
 				}
+				ts := quoteStates[sym].timestamp
+				if ts.IsZero() {
+					ts = time.Now().UTC()
+				}
 				handler(provider.Bar{
 					Symbol:    sym,
-					Timestamp: now,
+					Timestamp: ts,
 					Open:      bs.open,
 					High:      bs.high,
 					Low:       bs.low,
@@ -317,63 +506,49 @@ func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timefram
 				barStates[sym] = &barState{}
 			}
 
-		case msg := <-hub.EventCh:
-			if msg.Target != "GatewayQuote" {
-				continue
-			}
-			if len(msg.Arguments) < 2 {
-				continue
-			}
-			var contractID string
-			if err := json.Unmarshal(msg.Arguments[0], &contractID); err != nil {
+		case msg := <-ch:
+			contractID, quote, ok := parseQuoteEvent(msg)
+			if !ok {
 				continue
 			}
 			sym, ok := contractToSym[contractID]
 			if !ok {
 				continue
 			}
-			var quote struct {
-				LastPrice float64 `json:"lastPrice"`
-				Volume    float64 `json:"volume"`
-			}
-			if err := json.Unmarshal(msg.Arguments[1], &quote); err != nil {
-				continue
-			}
-			if quote.LastPrice == 0 {
+
+			qs := quoteStates[sym]
+			qs.merge(&quote)
+
+			if qs.lastPrice == 0 {
 				continue
 			}
 
 			bs := barStates[sym]
 			if !bs.hasData {
-				bs.open = quote.LastPrice
-				bs.high = quote.LastPrice
-				bs.low = quote.LastPrice
-				bs.start = time.Now().UTC()
+				bs.open = qs.lastPrice
+				bs.high = qs.lastPrice
+				bs.low = qs.lastPrice
 				bs.hasData = true
 			}
-			if quote.LastPrice > bs.high {
-				bs.high = quote.LastPrice
+			if qs.lastPrice > bs.high {
+				bs.high = qs.lastPrice
 			}
-			if quote.LastPrice < bs.low {
-				bs.low = quote.LastPrice
+			if qs.lastPrice < bs.low {
+				bs.low = qs.lastPrice
 			}
-			bs.close = quote.LastPrice
-			bs.volume = quote.Volume
+			bs.close = qs.lastPrice
+			bs.volume = qs.volume
 		}
 	}
 }
 
-// SubscribeTrades streams individual trade prints via the market hub.
+// SubscribeTrades streams individual trade prints via the shared market hub.
 func (p *Provider) SubscribeTrades(ctx context.Context, symbols []string, handler func(provider.Trade)) error {
 	if err := p.ensureConnected(ctx); err != nil {
 		return err
 	}
 
-	hub, err := dialHub(ctx, marketHubURL, p.auth.getToken())
-	if err != nil {
-		return err
-	}
-	defer hub.Close()
+	hub := p.getMarketHub(ctx)
 
 	contractToSym := make(map[string]string)
 	for _, sym := range symbols {
@@ -381,11 +556,23 @@ func (p *Provider) SubscribeTrades(ctx context.Context, symbols []string, handle
 		if err != nil {
 			return err
 		}
-		contractToSym[contract.StringID] = sym
-		if err := hub.Send(ctx, "SubscribeContractTrades", contract.StringID); err != nil {
+		contractToSym[contract.ID] = sym
+		if err := hub.subscribe(ctx, "SubscribeContractTrades", contract.ID); err != nil {
 			return fmt.Errorf("topstepx subscribeTrades %s: %w", sym, err)
 		}
 	}
+
+	ch := make(chan signalrMsg, 512)
+	handlerID := hub.addHandler(func(msg signalrMsg) {
+		if msg.Target != "GatewayTrade" {
+			return
+		}
+		select {
+		case ch <- msg:
+		default:
+		}
+	})
+	defer hub.removeHandler(handlerID)
 
 	log.Printf("topstepx: subscribed to trades for %v", symbols)
 
@@ -393,10 +580,7 @@ func (p *Provider) SubscribeTrades(ctx context.Context, symbols []string, handle
 		select {
 		case <-ctx.Done():
 			return nil
-		case msg := <-hub.EventCh:
-			if msg.Target != "GatewayTrade" {
-				continue
-			}
+		case msg := <-ch:
 			if len(msg.Arguments) < 2 {
 				continue
 			}
@@ -409,8 +593,9 @@ func (p *Provider) SubscribeTrades(ctx context.Context, symbols []string, handle
 				continue
 			}
 			var trade struct {
-				Price  float64 `json:"price"`
-				Volume float64 `json:"volume"`
+				Price     float64 `json:"price"`
+				Volume    float64 `json:"volume"`
+				Timestamp string  `json:"timestamp"`
 			}
 			if err := json.Unmarshal(msg.Arguments[1], &trade); err != nil {
 				continue
@@ -418,9 +603,15 @@ func (p *Provider) SubscribeTrades(ctx context.Context, symbols []string, handle
 			if trade.Price == 0 {
 				continue
 			}
+			ts := time.Now().UTC()
+			if trade.Timestamp != "" {
+				if parsed, err := time.Parse(time.RFC3339Nano, trade.Timestamp); err == nil {
+					ts = parsed
+				}
+			}
 			handler(provider.Trade{
 				Symbol:    sym,
-				Timestamp: time.Now().UTC(),
+				Timestamp: ts,
 				Price:     trade.Price,
 				Size:      trade.Volume,
 			})
@@ -428,17 +619,14 @@ func (p *Provider) SubscribeTrades(ctx context.Context, symbols []string, handle
 	}
 }
 
-// SubscribeQuotes streams bid/ask updates via the market hub.
+// SubscribeQuotes streams bid/ask updates via the shared market hub.
+// Handles TopstepX delta updates by tracking last-known state per symbol.
 func (p *Provider) SubscribeQuotes(ctx context.Context, symbols []string, handler func(provider.Quote)) error {
 	if err := p.ensureConnected(ctx); err != nil {
 		return err
 	}
 
-	hub, err := dialHub(ctx, marketHubURL, p.auth.getToken())
-	if err != nil {
-		return err
-	}
-	defer hub.Close()
+	hub := p.getMarketHub(ctx)
 
 	contractToSym := make(map[string]string)
 	for _, sym := range symbols {
@@ -446,55 +634,59 @@ func (p *Provider) SubscribeQuotes(ctx context.Context, symbols []string, handle
 		if err != nil {
 			return err
 		}
-		contractToSym[contract.StringID] = sym
-		if err := hub.Send(ctx, "SubscribeContractQuotes", contract.StringID); err != nil {
+		contractToSym[contract.ID] = sym
+		if err := hub.subscribe(ctx, "SubscribeContractQuotes", contract.ID); err != nil {
 			return fmt.Errorf("topstepx subscribeQuotes %s: %w", sym, err)
 		}
 	}
 
+	ch := make(chan signalrMsg, 512)
+	handlerID := hub.addHandler(func(msg signalrMsg) {
+		if msg.Target != "GatewayQuote" {
+			return
+		}
+		select {
+		case ch <- msg:
+		default:
+		}
+	})
+	defer hub.removeHandler(handlerID)
+
 	log.Printf("topstepx: subscribed to quotes for %v", symbols)
+
+	states := make(map[string]*quoteState)
+	for _, sym := range symbols {
+		states[sym] = &quoteState{}
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case msg := <-hub.EventCh:
-			if msg.Target != "GatewayQuote" {
-				continue
-			}
-			if len(msg.Arguments) < 2 {
-				continue
-			}
-			var contractID string
-			if err := json.Unmarshal(msg.Arguments[0], &contractID); err != nil {
+		case msg := <-ch:
+			contractID, quote, ok := parseQuoteEvent(msg)
+			if !ok {
 				continue
 			}
 			sym, ok := contractToSym[contractID]
 			if !ok {
 				continue
 			}
-			var quote struct {
-				BestBid  float64 `json:"bestBid"`
-				BestAsk  float64 `json:"bestAsk"`
-				BidSize  float64 `json:"bestBidSize"`
-				AskSize  float64 `json:"bestAskSize"`
-			}
-			if err := json.Unmarshal(msg.Arguments[1], &quote); err != nil {
-				continue
-			}
+
+			qs := states[sym]
+			qs.merge(&quote)
+
 			handler(provider.Quote{
 				Symbol:    sym,
-				Timestamp: time.Now().UTC(),
-				BidPrice:  quote.BestBid,
-				BidSize:   quote.BidSize,
-				AskPrice:  quote.BestAsk,
-				AskSize:   quote.AskSize,
+				Timestamp: qs.timestamp,
+				BidPrice:  qs.bestBid,
+				AskPrice:  qs.bestAsk,
 			})
 		}
 	}
 }
 
-// — Execution —
+// --- Execution ---
 
 func (p *Provider) GetAccount(ctx context.Context) (provider.Account, error) {
 	if err := p.ensureConnected(ctx); err != nil {
@@ -544,7 +736,7 @@ func (p *Provider) GetPositions(ctx context.Context) ([]provider.Position, error
 		if pos.Size == 0 {
 			continue
 		}
-		sym := p.symbolFromStringID(pos.ContractID)
+		sym := p.symbolFromContractID(pos.ContractID)
 		if sym == "" {
 			sym = pos.ContractID
 		}
@@ -567,7 +759,7 @@ func (p *Provider) GetOpenOrders(ctx context.Context) ([]provider.OpenOrder, err
 			ID         int64   `json:"id"`
 			ContractID string  `json:"contractId"`
 			Side       int     `json:"side"`       // 0=Buy, 1=Sell
-			Type       int     `json:"type"`        // 1=Limit, 2=Market, 4=Stop
+			Type       int     `json:"type"`       // 1=Limit, 2=Market, 4=Stop
 			Size       float64 `json:"size"`
 			FillVolume float64 `json:"fillVolume"`
 			LimitPrice float64 `json:"limitPrice"`
@@ -581,7 +773,7 @@ func (p *Provider) GetOpenOrders(ctx context.Context) ([]provider.OpenOrder, err
 
 	orders := make([]provider.OpenOrder, 0, len(resp.Orders))
 	for _, o := range resp.Orders {
-		sym := p.symbolFromStringID(o.ContractID)
+		sym := p.symbolFromContractID(o.ContractID)
 		if sym == "" {
 			sym = o.ContractID
 		}
@@ -616,7 +808,7 @@ func (p *Provider) PlaceOrder(ctx context.Context, order strategy.Order) (provid
 
 	req := map[string]any{
 		"accountId":  p.accountID,
-		"contractId": contract.StringID,
+		"contractId": contract.ID,
 		"type":       orderTypeToInt(order.OrderType),
 		"side":       side,
 		"size":       int(order.Qty),
@@ -629,8 +821,8 @@ func (p *Provider) PlaceOrder(ctx context.Context, order strategy.Order) (provid
 	}
 
 	var resp struct {
-		OrderID int64  `json:"orderId"`
-		Success bool   `json:"success"`
+		OrderID      int64  `json:"orderId"`
+		Success      bool   `json:"success"`
 		ErrorMessage string `json:"errorMessage"`
 	}
 	if err := p.auth.doPost(ctx, "/Order/place", req, &resp); err != nil {
@@ -669,27 +861,33 @@ func (p *Provider) CancelOrder(ctx context.Context, orderID string) error {
 	return nil
 }
 
-// SubscribeFills streams fill events via the user hub's GatewayUserTrade events.
+// SubscribeFills streams fill events via the shared user hub's GatewayUserTrade events.
 func (p *Provider) SubscribeFills(ctx context.Context, handler func(provider.Fill)) error {
 	if err := p.ensureConnected(ctx); err != nil {
 		return err
 	}
 
-	hub, err := dialHub(ctx, userHubURL, p.auth.getToken())
-	if err != nil {
-		return err
-	}
-	defer hub.Close()
+	hub := p.getUserHub(ctx)
 
-	// Subscribe to trade (fill) events for our account.
-	if err := hub.Send(ctx, "SubscribeTrades", p.accountID); err != nil {
+	// Subscribe to trade (fill) and order events for our account.
+	if err := hub.subscribe(ctx, "SubscribeTrades", p.accountID); err != nil {
 		return fmt.Errorf("topstepx subscribeFills: %w", err)
 	}
-
-	// Also subscribe to order events to correlate fills with order sides.
-	if err := hub.Send(ctx, "SubscribeOrders", p.accountID); err != nil {
+	if err := hub.subscribe(ctx, "SubscribeOrders", p.accountID); err != nil {
 		return fmt.Errorf("topstepx subscribeOrders: %w", err)
 	}
+
+	ch := make(chan signalrMsg, 512)
+	handlerID := hub.addHandler(func(msg signalrMsg) {
+		if msg.Target != "GatewayUserTrade" && msg.Target != "GatewayUserOrder" {
+			return
+		}
+		select {
+		case ch <- msg:
+		default:
+		}
+	})
+	defer hub.removeHandler(handlerID)
 
 	log.Printf("topstepx: subscribed to fills for account %d", p.accountID)
 
@@ -700,10 +898,9 @@ func (p *Provider) SubscribeFills(ctx context.Context, handler func(provider.Fil
 		select {
 		case <-ctx.Done():
 			return nil
-		case msg := <-hub.EventCh:
+		case msg := <-ch:
 			switch msg.Target {
 			case "GatewayUserOrder":
-				// Track order side for later fill correlation.
 				if len(msg.Arguments) < 1 {
 					continue
 				}
@@ -736,12 +933,11 @@ func (p *Provider) SubscribeFills(ctx context.Context, handler func(provider.Fil
 					continue
 				}
 
-				sym := p.symbolFromStringID(trade.ContractID)
+				sym := p.symbolFromContractID(trade.ContractID)
 				if sym == "" {
 					sym = trade.ContractID
 				}
 
-				// Determine side: prefer trade's own side field, fall back to order cache.
 				side := sideFromInt(trade.Side)
 				if side == "" {
 					side = orderSides[trade.OrderID]
@@ -760,7 +956,7 @@ func (p *Provider) SubscribeFills(ctx context.Context, handler func(provider.Fil
 	}
 }
 
-// — helpers —
+// --- helpers ---
 
 func sideFromInt(s int) string {
 	switch s {
@@ -845,5 +1041,52 @@ func barInterval(timeframe string) time.Duration {
 		return 24 * time.Hour
 	default:
 		return time.Minute
+	}
+}
+
+// RawMarketEvent is an unprocessed SignalR market event for debugging.
+type RawMarketEvent struct {
+	Target    string            // e.g. "GatewayQuote", "GatewayTrade"
+	Arguments []json.RawMessage // raw JSON payloads
+}
+
+// SubscribeRawMarketEvents streams raw SignalR events for the given symbols.
+// Uses a direct (non-shared) connection for debugging purposes.
+func (p *Provider) SubscribeRawMarketEvents(ctx context.Context, symbols []string, handler func(RawMarketEvent)) error {
+	if p.auth.getToken() == "" {
+		if err := p.auth.authenticate(); err != nil {
+			return err
+		}
+	}
+
+	hub, err := dialHub(ctx, marketHubURL, p.auth.getToken())
+	if err != nil {
+		return err
+	}
+	defer hub.Close()
+
+	for _, sym := range symbols {
+		contract, err := p.resolveContract(ctx, sym)
+		if err != nil {
+			return err
+		}
+		if err := hub.Send(ctx, "SubscribeContractQuotes", contract.ID); err != nil {
+			return fmt.Errorf("topstepx subscribeRaw quotes %s: %w", sym, err)
+		}
+		if err := hub.Send(ctx, "SubscribeContractTrades", contract.ID); err != nil {
+			return fmt.Errorf("topstepx subscribeRaw trades %s: %w", sym, err)
+		}
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case msg := <-hub.EventCh:
+			handler(RawMarketEvent{
+				Target:    msg.Target,
+				Arguments: msg.Arguments,
+			})
+		}
 	}
 }

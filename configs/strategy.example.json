@@ -41,5 +41,11 @@
     "demo": true
   },
 
+  "topstepx": {
+    "username": "",
+    "api_key": "",
+    "account_id": 1234567890
+  },
+
   "strategy": {}
 }

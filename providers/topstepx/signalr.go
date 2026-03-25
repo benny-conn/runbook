@@ -19,10 +19,10 @@ const (
 
 // SignalR message types.
 const (
-	signalrInvocation  = 1
-	signalrCompletion  = 3
-	signalrPing        = 6
-	signalrClose       = 7
+	signalrInvocation = 1
+	signalrCompletion = 3
+	signalrPing       = 6
+	signalrClose      = 7
 )
 
 const recordSep = '\x1e'
@@ -46,6 +46,9 @@ type hubConn struct {
 
 	// EventCh receives server-initiated invocations (push events).
 	EventCh chan signalrMsg
+
+	// closeCh is closed when the readLoop exits (connection died).
+	closeCh chan struct{}
 }
 
 // dialHub connects to a SignalR hub, performs the JSON protocol handshake,
@@ -61,7 +64,8 @@ func dialHub(ctx context.Context, hubURL, token string) (*hubConn, error) {
 
 	hc := &hubConn{
 		conn:    conn,
-		EventCh: make(chan signalrMsg, 512),
+		EventCh: make(chan signalrMsg, 2048),
+		closeCh: make(chan struct{}),
 	}
 
 	// SignalR handshake: send protocol selection, read server ack.
@@ -162,6 +166,7 @@ func (hc *hubConn) writeMsg(ctx context.Context, msg signalrMsg) error {
 }
 
 func (hc *hubConn) readLoop(ctx context.Context) {
+	defer close(hc.closeCh)
 	for {
 		_, raw, err := hc.conn.Read(ctx)
 		if err != nil {
@@ -218,6 +223,8 @@ func (hc *hubConn) pingLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-hc.closeCh:
+			return
 		case <-t.C:
 			_ = hc.writeMsg(ctx, signalrMsg{Type: signalrPing})
 		}
@@ -227,6 +234,195 @@ func (hc *hubConn) pingLoop(ctx context.Context) {
 func (hc *hubConn) Close() {
 	hc.conn.Close(websocket.StatusNormalClosure, "done")
 }
+
+// --- managedHub: auto-reconnecting hub wrapper ---
+
+// subscription records a SignalR method call for replay on reconnect.
+type subscription struct {
+	method string
+	args   []any
+}
+
+func (s subscription) key() string {
+	b, _ := json.Marshal(s.args)
+	return s.method + ":" + string(b)
+}
+
+// eventHandler is a registered consumer of hub events.
+type eventHandler struct {
+	id int
+	fn func(signalrMsg)
+}
+
+// managedHub wraps a hubConn with automatic reconnection and subscription replay.
+// Multiple consumers register handlers; the hub fans out events to all of them.
+type managedHub struct {
+	hubURL  string
+	tokenFn func() string // returns current auth token
+
+	mu            sync.RWMutex
+	subs          []subscription
+	subKeys       map[string]bool // dedup set
+	handlers      []eventHandler
+	nextHandlerID int
+	current       *hubConn // active connection, nil if disconnected
+}
+
+func newManagedHub(hubURL string, tokenFn func() string) *managedHub {
+	return &managedHub{
+		hubURL:  hubURL,
+		tokenFn: tokenFn,
+		subKeys: make(map[string]bool),
+	}
+}
+
+// subscribe records a subscription and sends it to the current hub if connected.
+func (m *managedHub) subscribe(ctx context.Context, method string, args ...any) error {
+	sub := subscription{method: method, args: args}
+	key := sub.key()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.subKeys[key] {
+		return nil // already subscribed
+	}
+	m.subs = append(m.subs, sub)
+	m.subKeys[key] = true
+
+	// Send to live hub if connected.
+	if m.current != nil {
+		return m.current.Send(ctx, method, args...)
+	}
+	return nil
+}
+
+// addHandler registers an event consumer, returning its ID for removal.
+func (m *managedHub) addHandler(fn func(signalrMsg)) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := m.nextHandlerID
+	m.nextHandlerID++
+	m.handlers = append(m.handlers, eventHandler{id: id, fn: fn})
+	return id
+}
+
+// removeHandler deregisters an event consumer.
+func (m *managedHub) removeHandler(id int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, h := range m.handlers {
+		if h.id == id {
+			m.handlers = append(m.handlers[:i], m.handlers[i+1:]...)
+			return
+		}
+	}
+}
+
+// run is the main reconnection loop. It dials the hub, replays subscriptions,
+// forwards events to handlers, and reconnects with exponential backoff on failure.
+// Blocks until ctx is cancelled.
+func (m *managedHub) run(ctx context.Context) {
+	backoff := time.Second
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		hub, err := dialHub(ctx, m.hubURL, m.tokenFn())
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("topstepx: %s dial failed: %v — retrying in %s", m.hubURL, err, backoff)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = minDuration(backoff*2, 30*time.Second)
+			continue
+		}
+
+		// Replay all recorded subscriptions on the fresh connection.
+		m.mu.Lock()
+		for _, sub := range m.subs {
+			if err := hub.Send(ctx, sub.method, sub.args...); err != nil {
+				log.Printf("topstepx: subscription replay failed (%s): %v", sub.method, err)
+			}
+		}
+		m.current = hub
+		m.mu.Unlock()
+
+		log.Printf("topstepx: %s connected", m.hubURL)
+		connected := time.Now()
+
+		// Forward events to all registered handlers until connection dies.
+		m.forwardEvents(ctx, hub)
+
+		// Connection lost.
+		m.mu.Lock()
+		m.current = nil
+		m.mu.Unlock()
+		hub.Close()
+
+		if ctx.Err() != nil {
+			return
+		}
+
+		// Reset backoff if connection was stable for >60s.
+		if time.Since(connected) > 60*time.Second {
+			backoff = time.Second
+		}
+
+		log.Printf("topstepx: %s connection lost — reconnecting in %s", m.hubURL, backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = minDuration(backoff*2, 30*time.Second)
+	}
+}
+
+// forwardEvents reads from the hub's EventCh and dispatches to all handlers.
+// Returns when the hub connection dies or ctx is cancelled.
+func (m *managedHub) forwardEvents(ctx context.Context, hub *hubConn) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hub.closeCh:
+			return
+		case msg := <-hub.EventCh:
+			m.mu.RLock()
+			for _, h := range m.handlers {
+				h.fn(msg)
+			}
+			m.mu.RUnlock()
+		}
+	}
+}
+
+// close shuts down the current connection.
+func (m *managedHub) close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.current != nil {
+		m.current.Close()
+		m.current = nil
+	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// --- helpers ---
 
 // stripRecordSep removes trailing 0x1E bytes.
 func stripRecordSep(b []byte) []byte {
