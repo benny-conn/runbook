@@ -868,32 +868,39 @@ func (p *Provider) PlaceOrder(ctx context.Context, order strategy.Order) (provid
 		req["stopPrice"] = order.StopPrice
 	}
 
-	// Broker-native bracket orders. TopStepX uses tick distance from fill price.
-	// TPDistance/SLDistance are already in price points — convert to ticks.
+	// Broker-native bracket orders. TopStepX uses signed tick offsets from fill:
+	//   Buy entry: TP = +ticks (above), SL = -ticks (below)
+	//   Sell entry: TP = -ticks (below), SL = +ticks (above)
 	if contract.TickSize > 0 {
 		slDist := order.SLDistance
 		tpDist := order.TPDistance
+
+		// Direction multiplier: buy=+1 (TP above, SL below), sell=-1 (TP below, SL above)
+		dir := 1
+		if side == 1 { // sell
+			dir = -1
+		}
 
 		if slDist > 0 {
 			slTicks := int(math.Round(slDist / contract.TickSize))
 			if slTicks > 0 {
 				req["stopLossBracket"] = map[string]any{
-					"ticks": slTicks,
-					"type":  2, // market
+					"ticks": -dir * slTicks, // SL is opposite direction of entry
+					"type":  4,              // Stop
 				}
 				log.Printf("topstepx: bracket SL=%d ticks (%.2f points) for %s %s",
-					slTicks, slDist, order.Side, order.Symbol)
+					-dir*slTicks, slDist, order.Side, order.Symbol)
 			}
 		}
 		if tpDist > 0 {
 			tpTicks := int(math.Round(tpDist / contract.TickSize))
 			if tpTicks > 0 {
 				req["takeProfitBracket"] = map[string]any{
-					"ticks": tpTicks,
-					"type":  1, // limit
+					"ticks": dir * tpTicks, // TP is same direction as entry
+					"type":  1,             // Limit
 				}
 				log.Printf("topstepx: bracket TP=%d ticks (%.2f points) for %s %s",
-					tpTicks, tpDist, order.Side, order.Symbol)
+					dir*tpTicks, tpDist, order.Side, order.Symbol)
 			}
 		}
 	}
