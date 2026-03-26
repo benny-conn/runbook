@@ -258,6 +258,9 @@ func (p *Provider) resolveContract(ctx context.Context, symbol string) (*contrac
 
 // GetContractSpec implements provider.ContractSpecProvider.
 func (p *Provider) GetContractSpec(ctx context.Context, symbol string) (provider.ContractSpec, error) {
+	if err := p.ensureConnected(ctx); err != nil {
+		return provider.ContractSpec{}, err
+	}
 	c, err := p.resolveContract(ctx, symbol)
 	if err != nil {
 		return provider.ContractSpec{}, err
@@ -748,30 +751,45 @@ func (p *Provider) GetPositions(ctx context.Context) ([]provider.Position, error
 		return nil, err
 	}
 
-	var resp struct {
-		Positions []struct {
-			ContractID   string  `json:"contractId"`
-			Size         float64 `json:"size"`
-			AveragePrice float64 `json:"averagePrice"`
-		} `json:"positions"`
-		Success bool `json:"success"`
+	// Use json.RawMessage first to log the raw response for debugging.
+	var rawResp struct {
+		Positions []json.RawMessage `json:"positions"`
+		Success   bool              `json:"success"`
 	}
-	if err := p.auth.doPost(ctx, "/Position/searchOpen", map[string]int64{"accountId": p.accountID}, &resp); err != nil {
+	if err := p.auth.doPost(ctx, "/Position/searchOpen", map[string]int64{"accountId": p.accountID}, &rawResp); err != nil {
 		return nil, fmt.Errorf("topstepx getPositions: %w", err)
 	}
 
-	positions := make([]provider.Position, 0, len(resp.Positions))
-	for _, pos := range resp.Positions {
+	positions := make([]provider.Position, 0, len(rawResp.Positions))
+	for _, raw := range rawResp.Positions {
+		log.Printf("topstepx: raw position: %s", string(raw))
+
+		var pos struct {
+			ContractID   string  `json:"contractId"`
+			Size         float64 `json:"size"`
+			Type         int     `json:"type"` // 1=Long, 2=Short
+			AveragePrice float64 `json:"averagePrice"`
+		}
+		if err := json.Unmarshal(raw, &pos); err != nil {
+			log.Printf("topstepx: position unmarshal error: %v", err)
+			continue
+		}
 		if pos.Size == 0 {
 			continue
 		}
+
+		qty := pos.Size
+		if pos.Type == 2 { // short
+			qty = -pos.Size
+		}
+
 		sym := p.symbolFromContractID(pos.ContractID)
 		if sym == "" {
 			sym = pos.ContractID
 		}
 		positions = append(positions, provider.Position{
 			Symbol:        sym,
-			Qty:           pos.Size,
+			Qty:           qty,
 			AvgEntryPrice: pos.AveragePrice,
 		})
 	}
@@ -908,12 +926,15 @@ func (p *Provider) SubscribeFills(ctx context.Context, handler func(provider.Fil
 
 	ch := make(chan signalrMsg, 512)
 	handlerID := hub.addHandler(func(msg signalrMsg) {
+		// Log ALL user hub events for diagnostics.
+		log.Printf("topstepx: user hub event: target=%s args=%d", msg.Target, len(msg.Arguments))
 		if msg.Target != "GatewayUserTrade" && msg.Target != "GatewayUserOrder" {
 			return
 		}
 		select {
 		case ch <- msg:
 		default:
+			log.Printf("topstepx: WARNING fill channel full, dropping %s event", msg.Target)
 		}
 	})
 	defer hub.removeHandler(handlerID)
@@ -931,34 +952,57 @@ func (p *Provider) SubscribeFills(ctx context.Context, handler func(provider.Fil
 			switch msg.Target {
 			case "GatewayUserOrder":
 				if len(msg.Arguments) < 1 {
+					log.Printf("topstepx: GatewayUserOrder with no arguments")
 					continue
 				}
-				var order struct {
-					ID   int64 `json:"id"`
-					Side int   `json:"side"` // 0=Buy, 1=Sell
+				log.Printf("topstepx: GatewayUserOrder raw: %s", string(msg.Arguments[0]))
+				var envelope struct {
+					Data struct {
+						ID   int64 `json:"id"`
+						Side int   `json:"side"` // 0=Buy, 1=Sell
+					} `json:"data"`
 				}
-				if err := json.Unmarshal(msg.Arguments[0], &order); err != nil {
+				if err := json.Unmarshal(msg.Arguments[0], &envelope); err != nil {
+					log.Printf("topstepx: GatewayUserOrder unmarshal error: %v", err)
 					continue
 				}
+				order := envelope.Data
 				orderSides[order.ID] = sideFromInt(order.Side)
+				log.Printf("topstepx: order event: id=%d side=%s", order.ID, sideFromInt(order.Side))
 
 			case "GatewayUserTrade":
 				if len(msg.Arguments) < 1 {
+					log.Printf("topstepx: GatewayUserTrade with no arguments")
 					continue
 				}
-				var trade struct {
-					ID         int64   `json:"id"`
-					OrderID    int64   `json:"orderId"`
-					ContractID string  `json:"contractId"`
-					Price      float64 `json:"price"`
-					Size       float64 `json:"size"`
-					Side       int     `json:"side"`
-					Voided     bool    `json:"voided"`
+				log.Printf("topstepx: GatewayUserTrade raw: %s", string(msg.Arguments[0]))
+				var envelope struct {
+					Action int `json:"action"` // 0=new, 1=update
+					Data   struct {
+						ID         int64   `json:"id"`
+						OrderID    int64   `json:"orderId"`
+						ContractID string  `json:"contractId"`
+						Price      float64 `json:"price"`
+						Size       float64 `json:"size"`
+						Side       int     `json:"side"`
+						Voided     bool    `json:"voided"`
+					} `json:"data"`
 				}
-				if err := json.Unmarshal(msg.Arguments[0], &trade); err != nil {
+				if err := json.Unmarshal(msg.Arguments[0], &envelope); err != nil {
+					log.Printf("topstepx: GatewayUserTrade unmarshal error: %v", err)
 					continue
 				}
-				if trade.Voided || trade.Price == 0 {
+				if envelope.Action != 0 {
+					log.Printf("topstepx: trade action=%d (not new), skipping id=%d", envelope.Action, envelope.Data.ID)
+					continue
+				}
+				trade := envelope.Data
+				if trade.Voided {
+					log.Printf("topstepx: trade voided, skipping id=%d", trade.ID)
+					continue
+				}
+				if trade.Price == 0 {
+					log.Printf("topstepx: trade price=0, skipping id=%d", trade.ID)
 					continue
 				}
 
@@ -971,6 +1015,9 @@ func (p *Provider) SubscribeFills(ctx context.Context, handler func(provider.Fil
 				if side == "" {
 					side = orderSides[trade.OrderID]
 				}
+
+				log.Printf("topstepx: fill event: id=%d orderID=%d sym=%s side=%s qty=%.0f price=%.2f",
+					trade.ID, trade.OrderID, sym, side, trade.Size, trade.Price)
 
 				handler(provider.Fill{
 					OrderID:   strconv.FormatInt(trade.OrderID, 10),

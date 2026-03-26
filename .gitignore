@@ -18,9 +18,11 @@ references/
 configs/*.json
 !configs/strategy.example.json
 
-script_example.js
-
 notes.md
 
 *.pem
 .DS_Store
+
+scripts/
+
+*.log

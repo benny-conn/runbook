@@ -290,9 +290,15 @@ func (m *managedHub) subscribe(ctx context.Context, method string, args ...any) 
 	m.subs = append(m.subs, sub)
 	m.subKeys[key] = true
 
-	// Send to live hub if connected.
+	// Invoke (with invocation ID + ack) on live hub if connected.
 	if m.current != nil {
-		return m.current.Send(ctx, method, args...)
+		resp, err := m.current.Invoke(ctx, method, args...)
+		if err != nil {
+			log.Printf("topstepx: subscribe %s failed: %v", method, err)
+			return err
+		}
+		log.Printf("topstepx: subscribe %s OK (result=%s)", method, string(resp.Result))
+		return nil
 	}
 	return nil
 }
@@ -348,8 +354,11 @@ func (m *managedHub) run(ctx context.Context) {
 		// Replay all recorded subscriptions on the fresh connection.
 		m.mu.Lock()
 		for _, sub := range m.subs {
-			if err := hub.Send(ctx, sub.method, sub.args...); err != nil {
+			resp, err := hub.Invoke(ctx, sub.method, sub.args...)
+			if err != nil {
 				log.Printf("topstepx: subscription replay failed (%s): %v", sub.method, err)
+			} else {
+				log.Printf("topstepx: subscription replay %s OK (result=%s)", sub.method, string(resp.Result))
 			}
 		}
 		m.current = hub
@@ -394,13 +403,19 @@ func (m *managedHub) forwardEvents(ctx context.Context, hub *hubConn) {
 		case <-ctx.Done():
 			return
 		case <-hub.closeCh:
+			log.Printf("topstepx: %s hub closeCh fired — connection lost", m.hubURL)
 			return
 		case msg := <-hub.EventCh:
 			m.mu.RLock()
+			numHandlers := len(m.handlers)
 			for _, h := range m.handlers {
 				h.fn(msg)
 			}
 			m.mu.RUnlock()
+			// Only log user hub events (fills/orders), not market hub spam.
+			if msg.Target != "" && msg.Type == signalrInvocation && m.hubURL == userHubURL {
+				log.Printf("topstepx: user hub forwarded %s to %d handler(s)", msg.Target, numHandlers)
+			}
 		}
 	}
 }

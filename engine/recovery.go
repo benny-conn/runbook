@@ -207,7 +207,6 @@ func simulateFills(strat strategy.Strategy, port *portfolio.SimulatedPortfolio, 
 		}
 		port.ApplyFill(fill)
 		strat.OnFill(fill)
-		log.Printf("recovery: simulated fill %s %s qty=%.2f @ $%.4f", fill.Side, fill.Symbol, fill.Qty, fill.Price)
 	}
 }
 
