@@ -26,6 +26,7 @@ type SimulatedPortfolio struct {
 	positions   map[string]*strategy.Position
 	multipliers map[string]float64 // symbol → point value (1.0 for equities)
 	holdingBars map[string]int     // symbol → bars since position opened
+	lastPrices  map[string]float64 // symbol → most recent market price
 }
 
 func NewSimulatedPortfolio(initialCash float64) *SimulatedPortfolio {
@@ -33,6 +34,7 @@ func NewSimulatedPortfolio(initialCash float64) *SimulatedPortfolio {
 		cash:        initialCash,
 		positions:   make(map[string]*strategy.Position),
 		holdingBars: make(map[string]int),
+		lastPrices:  make(map[string]float64),
 	}
 }
 
@@ -179,25 +181,13 @@ func (p *SimulatedPortfolio) ComputeFillPL(fill strategy.Fill) float64 {
 	return 0
 }
 
-// ClassifyFillSide returns the effective side for a fill: "buy", "sell", or "short".
-// "short" indicates the sell is opening a new short rather than closing a long.
+// ClassifyFillSide returns the effective side for a fill: always "buy" or "sell".
 // Must be called BEFORE ApplyFill.
 func (p *SimulatedPortfolio) ClassifyFillSide(fill strategy.Fill) string {
-	if fill.Side != "sell" {
-		return fill.Side
+	if fill.Side == "short" {
+		return "sell" // normalize "short" to "sell"
 	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	pos, exists := p.positions[fill.Symbol]
-	if !exists || pos.Qty <= 0 {
-		return "short" // no long position — this sell opens a short
-	}
-	if fill.Qty > pos.Qty {
-		// Partially closes long, partially opens short — call it "sell" for now;
-		// the closing portion is captured in ComputeFillPL.
-		return "sell"
-	}
-	return "sell"
+	return fill.Side
 }
 
 // ApplyFill updates cash and positions based on a completed fill.
@@ -296,11 +286,19 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 	}
 }
 
+// LastPrice returns the most recent market price for a symbol (0 if never seen).
+func (p *SimulatedPortfolio) LastPrice(symbol string) float64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.lastPrices[symbol]
+}
+
 // UpdateMarketPrice refreshes the market value and unrealized P&L for a symbol.
 // Called on every tick so equity stays current.
 func (p *SimulatedPortfolio) UpdateMarketPrice(symbol string, price float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.lastPrices[symbol] = price
 	pos, exists := p.positions[symbol]
 	if !exists {
 		return

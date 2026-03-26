@@ -17,17 +17,22 @@ type Tick struct {
 }
 
 // Order is a trade instruction returned by a strategy.
+//
+// Contract per OrderType:
+//
+//	"market"     — requires: symbol, side, qty. Optional: tpDistance, slDistance.
+//	"limit"      — requires: symbol, side, qty, limitPrice. Optional: tpDistance, slDistance.
+//	"stop"       — requires: symbol, side, qty, stopPrice. No brackets.
+//	"stop_limit" — requires: symbol, side, qty, stopPrice, limitPrice. No brackets.
 type Order struct {
 	Symbol     string
 	Side       string  // "buy" or "sell"
 	Qty        float64
 	OrderType  string  // "market", "limit", "stop", or "stop_limit"
-	LimitPrice float64 // limit price for limit and stop-limit orders
-	StopPrice  float64 // trigger price for stop and stop-limit orders
-	StopLoss   float64 // broker-native bracket stop loss — absolute price (0 = disabled)
-	TakeProfit float64 // broker-native bracket take profit — absolute price (0 = disabled)
-	SLDistance float64 // stop loss distance in price points from entry (0 = disabled)
-	TPDistance float64 // take profit distance in price points from entry (0 = disabled)
+	LimitPrice float64 // required for "limit" and "stop_limit" orders
+	StopPrice  float64 // required for "stop" and "stop_limit" orders
+	TPDistance  float64 // take profit distance in price points from entry (0 = none)
+	SLDistance  float64 // stop loss distance in price points from entry (0 = none)
 	Reason     string  // for logging/debugging
 }
 
@@ -53,7 +58,8 @@ type Position struct {
 	HoldingBars  int     // number of bars since position was opened
 }
 
-// Portfolio is a read-only view of the current account state passed into OnBar.
+// Portfolio is a read-only view of the current account state.
+// The engine updates the portfolio global before each strategy callback.
 type Portfolio interface {
 	Cash() float64
 	Equity() float64
@@ -95,7 +101,8 @@ type Configurable interface {
 type Strategy interface {
 	Name() string
 	Timeframes() []string
-	OnBar(timeframe string, tick Tick, portfolio Portfolio) []Order
+	SetPortfolio(portfolio Portfolio) // called by engine before each callback
+	OnBar(timeframe string, tick Tick) []Order
 	OnFill(fill Fill)
 }
 
@@ -104,7 +111,7 @@ type Strategy interface {
 // If the strategy implements this, the paper engine will also subscribe to
 // the trade stream for the requested symbols.
 type TradeSubscriber interface {
-	OnTrade(trade Trade, portfolio Portfolio) []Order
+	OnTrade(trade Trade) []Order
 }
 
 // Quote represents a real-time bid/ask update from the exchange.
@@ -122,7 +129,7 @@ type Quote struct {
 // quote stream for the requested symbols in addition to bars.
 // Useful for spread-aware entry logic and limit order placement.
 type QuoteSubscriber interface {
-	OnQuote(quote Quote, portfolio Portfolio) []Order
+	OnQuote(quote Quote) []Order
 }
 
 // InitContext holds the context passed to a strategy's OnInit hook and
@@ -162,8 +169,8 @@ type Initializer interface {
 // OnMarketClose fires once at market close — useful for EOD cleanup,
 // flattening positions, logging daily P&L, preparing for the next day.
 type DailySessionHandler interface {
-	OnMarketOpen(portfolio Portfolio) []Order
-	OnMarketClose(portfolio Portfolio) []Order
+	OnMarketOpen() []Order
+	OnMarketClose() []Order
 }
 
 // Shutdowner is an optional interface a strategy can implement to run

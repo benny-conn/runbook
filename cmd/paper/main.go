@@ -122,6 +122,10 @@ func main() {
 	}
 
 	cfg := engine.DefaultConfig(*capitalFlag)
+	// TopStepX force-closes positions at 4:10 PM ET — always flatten before they do.
+	if *providerFlag == "topstepx" || *execProviderFlag == "topstepx" {
+		cfg.FlattenAtClose = true
+	}
 	eng := engine.NewEngine(strat, md, exec, store, cfg)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

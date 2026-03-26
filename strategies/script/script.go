@@ -51,6 +51,14 @@ type ScriptStrategy struct {
 	contractSpecs  map[string]strategy.ContractSpec
 }
 
+// SetPortfolio implements strategy.Strategy. Updates the "portfolio" JS global
+// so all callbacks access current portfolio state.
+func (s *ScriptStrategy) SetPortfolio(p strategy.Portfolio) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.vm.Set("portfolio", s.makePortfolioObj(p))
+}
+
 // New creates a ScriptStrategy by compiling src in a Goja runtime.
 func New(name, src string, config map[string]string, opts ...Option) (*ScriptStrategy, error) {
 	var options scriptOptions
@@ -289,7 +297,7 @@ func (s *ScriptStrategy) Timeframes() []string {
 
 // OnBar implements strategy.Strategy.
 // Called for every completed bar at every declared timeframe.
-func (s *ScriptStrategy) OnBar(timeframe string, tick strategy.Tick, portfolio strategy.Portfolio) []strategy.Order {
+func (s *ScriptStrategy) OnBar(timeframe string, tick strategy.Tick) []strategy.Order {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -309,9 +317,8 @@ func (s *ScriptStrategy) OnBar(timeframe string, tick strategy.Tick, portfolio s
 		"volume":    tick.Volume,
 	})
 
-	portfolioVal := s.makePortfolioObj(portfolio)
 
-	result, err := s.onBarFn(goja.Undefined(), s.vm.ToValue(timeframe), tickVal, portfolioVal)
+	result, err := s.onBarFn(goja.Undefined(), s.vm.ToValue(timeframe), tickVal)
 	if err != nil {
 		msg := fmt.Sprintf("script onBar error: %v", err)
 		fmt.Println(msg)
@@ -329,6 +336,7 @@ func (s *ScriptStrategy) OnFill(fill strategy.Fill) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 
 	fillVal := s.vm.ToValue(map[string]interface{}{
 		"symbol":    fill.Symbol,
@@ -349,12 +357,13 @@ func (s *ScriptStrategy) OnFill(fill strategy.Fill) {
 // ---------------------------------------------------------------------------
 
 // OnTrade implements strategy.TradeSubscriber.
-func (s *ScriptStrategy) OnTrade(trade strategy.Trade, portfolio strategy.Portfolio) []strategy.Order {
+func (s *ScriptStrategy) OnTrade(trade strategy.Trade) []strategy.Order {
 	if s.onTrade == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 
 	tradeVal := s.vm.ToValue(map[string]interface{}{
 		"symbol":    trade.Symbol,
@@ -363,9 +372,7 @@ func (s *ScriptStrategy) OnTrade(trade strategy.Trade, portfolio strategy.Portfo
 		"size":      trade.Size,
 	})
 
-	portfolioVal := s.makePortfolioObj(portfolio)
-
-	result, err := s.onTrade(goja.Undefined(), tradeVal, portfolioVal)
+	result, err := s.onTrade(goja.Undefined(), tradeVal)
 	if err != nil {
 		msg := fmt.Sprintf("script onTrade error: %v", err)
 		fmt.Println(msg)
@@ -511,16 +518,15 @@ func (s *ScriptStrategy) OnInit(ctx strategy.InitContext) error {
 // ---------------------------------------------------------------------------
 
 // OnMarketOpen implements strategy.SessionHandler.
-func (s *ScriptStrategy) OnMarketOpen(portfolio strategy.Portfolio) []strategy.Order {
+func (s *ScriptStrategy) OnMarketOpen() []strategy.Order {
 	if s.onMarketOpen == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	portfolioVal := s.makePortfolioObj(portfolio)
 
-	result, err := s.onMarketOpen(goja.Undefined(), portfolioVal)
+	result, err := s.onMarketOpen(goja.Undefined())
 	if err != nil {
 		msg := fmt.Sprintf("script onMarketOpen error: %v", err)
 		fmt.Println(msg)
@@ -532,16 +538,15 @@ func (s *ScriptStrategy) OnMarketOpen(portfolio strategy.Portfolio) []strategy.O
 }
 
 // OnMarketClose implements strategy.SessionHandler.
-func (s *ScriptStrategy) OnMarketClose(portfolio strategy.Portfolio) []strategy.Order {
+func (s *ScriptStrategy) OnMarketClose() []strategy.Order {
 	if s.onMarketClose == nil {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	portfolioVal := s.makePortfolioObj(portfolio)
 
-	result, err := s.onMarketClose(goja.Undefined(), portfolioVal)
+	result, err := s.onMarketClose(goja.Undefined())
 	if err != nil {
 		msg := fmt.Sprintf("script onMarketClose error: %v", err)
 		fmt.Println(msg)
@@ -718,12 +723,6 @@ func (s *ScriptStrategy) parseOrders(val goja.Value) []strategy.Order {
 		}
 		if v := getFloatField(m, "stopPrice"); v != 0 {
 			o.StopPrice = v
-		}
-		if v := getFloatField(m, "stopLoss"); v != 0 {
-			o.StopLoss = v
-		}
-		if v := getFloatField(m, "takeProfit"); v != 0 {
-			o.TakeProfit = v
 		}
 		if v := getFloatField(m, "slDistance"); v != 0 {
 			o.SLDistance = v

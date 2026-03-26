@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/benny-conn/brandon-bot/internal/bracket"
 	"github.com/benny-conn/brandon-bot/internal/portfolio"
 	"github.com/benny-conn/brandon-bot/provider"
 	"github.com/benny-conn/brandon-bot/strategy"
@@ -114,14 +115,14 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 			if hasDailyHooks && date != currentDate {
 				if currentDate != "" {
 					// End of previous day — fire OnMarketClose.
-					closeOrders := dsh.OnMarketClose(e.portfolio)
-					simulateFills(e.strategy, e.portfolio, closeOrders, tick)
+					closeOrders := dsh.OnMarketClose()
+					simulateFills(e.strategy, e.portfolio, closeOrders, tick, e)
 				}
 				currentDate = date
 				// Start of new day — fire OnMarketOpen.
 				e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
-				openOrders := dsh.OnMarketOpen(e.portfolio)
-				simulateFills(e.strategy, e.portfolio, openOrders, tick)
+				openOrders := dsh.OnMarketOpen()
+				simulateFills(e.strategy, e.portfolio, openOrders, tick, e)
 			} else {
 				e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
 			}
@@ -133,15 +134,16 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 
 		// Fire final OnMarketClose so strategy state is up to date.
 		if hasDailyHooks && currentDate != "" {
-			closeOrders := dsh.OnMarketClose(e.portfolio)
+			closeOrders := dsh.OnMarketClose()
 			if len(bars) > 0 {
 				lastTick := provider.BarToTick(bars[len(bars)-1])
-				simulateFills(e.strategy, e.portfolio, closeOrders, lastTick)
+				simulateFills(e.strategy, e.portfolio, closeOrders, lastTick, e)
 			}
 		}
 	}
 
 	e.warmingUp = false
+	e.warmupBrackets = nil // clear simulated brackets
 
 	// Reset portfolio to the real broker/backend state after warmup replay.
 	// Simulated fills shifted balances/positions — restore truth before going live.
@@ -216,20 +218,31 @@ func seedPositions(port *portfolio.SimulatedPortfolio, positions []provider.Posi
 // those fills replicated during warmup. This means indicator state and position
 // tracking may be slightly incorrect after recovery. For best results, use
 // market orders for entries or implement PositionSeeder to reconcile state.
-func simulateFills(strat strategy.Strategy, port *portfolio.SimulatedPortfolio, orders []strategy.Order, tick strategy.Tick) {
+func simulateFills(strat strategy.Strategy, port *portfolio.SimulatedPortfolio, orders []strategy.Order, tick strategy.Tick, eng *Engine) {
 	for _, o := range orders {
 		if o.OrderType != "market" && o.OrderType != "" {
 			continue
 		}
+
+		fillPrice := tick.Close
+
 		fill := strategy.Fill{
 			Symbol:    o.Symbol,
 			Side:      o.Side,
 			Qty:       o.Qty,
-			Price:     tick.Close,
+			Price:     fillPrice,
 			Timestamp: tick.Timestamp,
 		}
 		port.ApplyFill(fill)
+		strat.SetPortfolio(port)
 		strat.OnFill(fill)
+
+		// Register bracket for simulation on subsequent bars.
+		if eng != nil {
+			if b := bracket.NewFromOrder(o, fillPrice); b != nil {
+				eng.warmupBrackets = append(eng.warmupBrackets, *b)
+			}
+		}
 	}
 }
 

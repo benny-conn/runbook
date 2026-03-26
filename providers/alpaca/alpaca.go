@@ -43,6 +43,25 @@ type Provider struct {
 	tradeSymbols []string
 	quoteHandler func(stream.Quote)
 	quoteSymbols []string
+
+	// Last known prices per symbol, updated from bar stream.
+	priceMu    sync.RWMutex
+	lastPrices map[string]float64
+}
+
+func (p *Provider) updateLastPrice(symbol string, price float64) {
+	p.priceMu.Lock()
+	if p.lastPrices == nil {
+		p.lastPrices = make(map[string]float64)
+	}
+	p.lastPrices[symbol] = price
+	p.priceMu.Unlock()
+}
+
+func (p *Provider) lastPrice(symbol string) float64 {
+	p.priceMu.RLock()
+	defer p.priceMu.RUnlock()
+	return p.lastPrices[symbol]
 }
 
 // New creates an Alpaca provider. Config fields override env vars where set.
@@ -144,6 +163,7 @@ func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timefram
 	opts := []stream.StockOption{
 		stream.WithCredentials(p.apiKey, p.secret),
 		stream.WithBars(func(b stream.Bar) {
+			p.updateLastPrice(b.Symbol, b.Close)
 			handler(provider.Bar{
 				Symbol:    b.Symbol,
 				Timestamp: b.Timestamp,
@@ -248,16 +268,32 @@ func (p *Provider) PlaceOrder(ctx context.Context, order strategy.Order) (provid
 		req.TimeInForce = alp.GTC
 	}
 
-	// Broker-native bracket orders: StopLoss/TakeProfit are absolute prices for Alpaca.
-	if order.StopLoss > 0 || order.TakeProfit > 0 {
-		req.OrderClass = alp.Bracket
-		if order.TakeProfit > 0 {
-			tp := decimal.NewFromFloat(order.TakeProfit)
-			req.TakeProfit = &alp.TakeProfit{LimitPrice: &tp}
+	// Broker-native bracket orders. Alpaca needs absolute prices.
+	// Convert TPDistance/SLDistance to absolute prices using the limit price
+	// (for limit orders) or the last known market price (for market orders).
+	if order.TPDistance > 0 || order.SLDistance > 0 {
+		ref := order.LimitPrice
+		if ref == 0 {
+			ref = p.lastPrice(order.Symbol)
 		}
-		if order.StopLoss > 0 {
-			sl := decimal.NewFromFloat(order.StopLoss)
-			req.StopLoss = &alp.StopLoss{StopPrice: &sl}
+		if ref > 0 {
+			req.OrderClass = alp.Bracket
+			if order.TPDistance > 0 {
+				tp := ref + order.TPDistance
+				if order.Side == "sell" {
+					tp = ref - order.TPDistance
+				}
+				tpDec := decimal.NewFromFloat(tp)
+				req.TakeProfit = &alp.TakeProfit{LimitPrice: &tpDec}
+			}
+			if order.SLDistance > 0 {
+				sl := ref - order.SLDistance
+				if order.Side == "sell" {
+					sl = ref + order.SLDistance
+				}
+				slDec := decimal.NewFromFloat(sl)
+				req.StopLoss = &alp.StopLoss{StopPrice: &slDec}
+			}
 		}
 	}
 

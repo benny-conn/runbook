@@ -113,18 +113,34 @@ func main() {
 		baseTimeframe, strings.Join(symbols, ", "),
 		from.Format("2006-01-02"), to.Format("2006-01-02"), *dataProviderFlag)
 
+	// Parse provider configs from the config file if available.
+	var providerCfg struct {
+		Alpaca   alpacaprovider.Config   `json:"alpaca"`
+		TopstepX topstepxprovider.Config `json:"topstepx"`
+		Coinbase coinbaseprovider.Config `json:"coinbase"`
+		Kalshi   kalshiprovider.Config   `json:"kalshi"`
+		Massive  massiveprovider.Config  `json:"massive"`
+	}
+	if *configFlag != "" {
+		data, _ := os.ReadFile(*configFlag)
+		json.Unmarshal(data, &providerCfg)
+	}
+
 	var md provider.MarketData
 	switch *dataProviderFlag {
 	case "alpaca":
-		md = alpacaprovider.New(alpacaprovider.Config{Feed: *feedFlag})
+		if providerCfg.Alpaca.Feed == "" {
+			providerCfg.Alpaca.Feed = *feedFlag
+		}
+		md = alpacaprovider.New(providerCfg.Alpaca)
 	case "massive":
-		md = massiveprovider.New(massiveprovider.Config{})
+		md = massiveprovider.New(providerCfg.Massive)
 	case "topstepx":
-		md = topstepxprovider.New(topstepxprovider.Config{})
+		md = topstepxprovider.New(providerCfg.TopstepX)
 	case "coinbase":
-		md = coinbaseprovider.New(coinbaseprovider.Config{})
+		md = coinbaseprovider.New(providerCfg.Coinbase)
 	case "kalshi":
-		md = kalshiprovider.New(kalshiprovider.Config{})
+		md = kalshiprovider.New(providerCfg.Kalshi)
 	default:
 		log.Fatalf("unknown data provider %q — use alpaca, massive, topstepx, coinbase, or kalshi", *dataProviderFlag)
 	}
@@ -152,11 +168,16 @@ func main() {
 	var opts []backtest.EngineOption
 	if csp, ok := md.(provider.ContractSpecProvider); ok {
 		multipliers := make(map[string]float64)
+		specs := make(map[string]strategy.ContractSpec)
 		for _, sym := range symbols {
 			spec, err := csp.GetContractSpec(context.Background(), sym)
 			if err != nil {
 				log.Printf("contract spec for %s: %v (defaulting to equity)", sym, err)
 				continue
+			}
+			specs[sym] = strategy.ContractSpec{
+				Symbol: spec.Symbol, TickSize: spec.TickSize,
+				TickValue: spec.TickValue, PointValue: spec.PointValue,
 			}
 			if spec.PointValue > 1.0 {
 				multipliers[sym] = spec.PointValue
@@ -166,6 +187,10 @@ func main() {
 		}
 		if len(multipliers) > 0 {
 			opts = append(opts, backtest.WithMultipliers(multipliers))
+		}
+		// Pass contract specs to strategy for getContract() global.
+		if csc, ok := strat.(strategy.ContractSpecConsumer); ok {
+			csc.SetContractSpecs(specs)
 		}
 	}
 

@@ -537,31 +537,47 @@ func (p *Provider) PlaceOrder(ctx context.Context, order strategy.Order) (provid
 	}
 
 	// Broker-native brackets via OSO (one-sends-other).
-	// StopLoss and TakeProfit are absolute prices for Tradovate.
-	// When the entry fills, both brackets activate as OCO pair.
+	// Convert TPDistance/SLDistance to absolute prices using limit price or last known price.
 	endpoint := "order/placeorder"
-	if order.StopLoss > 0 || order.TakeProfit > 0 {
-		endpoint = "order/placeOSO"
-		exitAction := "Sell"
-		if order.Side == "sell" {
-			exitAction = "Buy"
+	if order.TPDistance > 0 || order.SLDistance > 0 {
+		ref := order.LimitPrice
+		if ref == 0 {
+			ref = order.StopPrice // for stop entries
 		}
-		if order.TakeProfit > 0 {
-			req["bracket1"] = map[string]any{
-				"action":    exitAction,
-				"orderType": "Limit",
-				"price":     order.TakeProfit,
+		// Note: for market orders without a reference price, brackets cannot be placed.
+		// The engine's warmup simulation handles this; live trading relies on the provider's
+		// last known price. TODO: add lastPrice tracking to Tradovate provider.
+		if ref > 0 {
+			endpoint = "order/placeOSO"
+			exitAction := "Sell"
+			if order.Side == "sell" {
+				exitAction = "Buy"
 			}
-		}
-		if order.StopLoss > 0 {
-			bracketKey := "bracket2"
-			if order.TakeProfit == 0 {
-				bracketKey = "bracket1" // only SL, no TP
+			if order.TPDistance > 0 {
+				tp := ref + order.TPDistance
+				if order.Side == "sell" {
+					tp = ref - order.TPDistance
+				}
+				req["bracket1"] = map[string]any{
+					"action":    exitAction,
+					"orderType": "Limit",
+					"price":     tp,
+				}
 			}
-			req[bracketKey] = map[string]any{
-				"action":    exitAction,
-				"orderType": "Stop",
-				"stopPrice": order.StopLoss,
+			if order.SLDistance > 0 {
+				sl := ref - order.SLDistance
+				if order.Side == "sell" {
+					sl = ref + order.SLDistance
+				}
+				bracketKey := "bracket2"
+				if order.TPDistance == 0 {
+					bracketKey = "bracket1"
+				}
+				req[bracketKey] = map[string]any{
+					"action":    exitAction,
+					"orderType": "Stop",
+					"stopPrice": sl,
+				}
 			}
 		}
 	}

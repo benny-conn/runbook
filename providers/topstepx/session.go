@@ -8,13 +8,13 @@ import (
 	"github.com/benny-conn/brandon-bot/provider"
 )
 
-// CME futures schedule (ES, NQ, etc.):
+// TopStepX futures schedule:
 //   Open:  Sunday 6:00 PM ET
-//   Close: Friday 5:00 PM ET
-//   Daily halt: 5:00 PM – 6:00 PM ET (Mon–Fri)
+//   Close: Friday 4:10 PM ET
+//   Daily halt: 4:10 PM – 6:00 PM ET (Mon–Fri)
 //
-// So the market is "open" from 6:00 PM to 5:00 PM the next day, every day
-// except the weekend gap (Friday 5 PM → Sunday 6 PM).
+// So the market is "open" from 6:00 PM to 4:10 PM the next day, every day
+// except the weekend gap (Friday 4:10 PM → Sunday 6 PM).
 
 // SubscribeSession emits market_open and market_close events following the
 // CME E-mini futures schedule. Implements provider.SessionNotifier.
@@ -52,23 +52,24 @@ func (p *Provider) SubscribeSession(ctx context.Context, handler func(provider.S
 	}
 }
 
-// isMarketOpen returns whether the CME futures market is currently in session.
+// closeHour and closeMin define the daily TopStepX close time (4:10 PM ET).
+const closeHour, closeMin = 16, 10
+
+// isMarketOpen returns whether the TopStepX futures market is currently in session.
 func isMarketOpen(now time.Time) bool {
 	wd := now.Weekday()
-	hour := now.Hour()
+	hhmm := now.Hour()*60 + now.Minute()
+	closeAt := closeHour*60 + closeMin // 16:10 = 970
 
 	switch wd {
 	case time.Saturday:
 		return false
 	case time.Sunday:
-		// Open at 6 PM Sunday
-		return hour >= 18
+		return hhmm >= 18*60 // open at 6 PM
 	case time.Friday:
-		// Close at 5 PM Friday
-		return hour < 17
+		return hhmm < closeAt
 	default: // Mon–Thu
-		// Halt from 5 PM to 6 PM, otherwise open
-		return hour < 17 || hour >= 18
+		return hhmm < closeAt || hhmm >= 18*60
 	}
 }
 
@@ -76,44 +77,39 @@ func isMarketOpen(now time.Time) bool {
 // event from the given time.
 func nextSessionEvent(now time.Time) (time.Time, string) {
 	wd := now.Weekday()
-	hour := now.Hour()
+	hhmm := now.Hour()*60 + now.Minute()
+	closeAt := closeHour*60 + closeMin
 	day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	closeTime := time.Date(day.Year(), day.Month(), day.Day(), closeHour, closeMin, 0, 0, now.Location())
+	openTime := time.Date(day.Year(), day.Month(), day.Day(), 18, 0, 0, 0, now.Location())
 
 	switch wd {
 	case time.Saturday:
-		// Next event: market_open Sunday 6 PM
 		sunday := day.AddDate(0, 0, 1)
 		return time.Date(sunday.Year(), sunday.Month(), sunday.Day(), 18, 0, 0, 0, now.Location()), "market_open"
 
 	case time.Sunday:
-		if hour < 18 {
-			// Before Sunday open → next: market_open Sunday 6 PM
-			return time.Date(day.Year(), day.Month(), day.Day(), 18, 0, 0, 0, now.Location()), "market_open"
+		if hhmm < 18*60 {
+			return openTime, "market_open"
 		}
-		// After Sunday open → next: market_close Monday 5 PM
 		monday := day.AddDate(0, 0, 1)
-		return time.Date(monday.Year(), monday.Month(), monday.Day(), 17, 0, 0, 0, now.Location()), "market_close"
+		return time.Date(monday.Year(), monday.Month(), monday.Day(), closeHour, closeMin, 0, 0, now.Location()), "market_close"
 
 	case time.Friday:
-		if hour < 17 {
-			// Before Friday close → next: market_close Friday 5 PM
-			return time.Date(day.Year(), day.Month(), day.Day(), 17, 0, 0, 0, now.Location()), "market_close"
+		if hhmm < closeAt {
+			return closeTime, "market_close"
 		}
-		// After Friday close → next: market_open Sunday 6 PM
 		sunday := day.AddDate(0, 0, 2)
 		return time.Date(sunday.Year(), sunday.Month(), sunday.Day(), 18, 0, 0, 0, now.Location()), "market_open"
 
 	default: // Mon–Thu
-		if hour < 17 {
-			// Before daily halt → next: market_close at 5 PM
-			return time.Date(day.Year(), day.Month(), day.Day(), 17, 0, 0, 0, now.Location()), "market_close"
+		if hhmm < closeAt {
+			return closeTime, "market_close"
 		}
-		if hour < 18 {
-			// During daily halt → next: market_open at 6 PM
-			return time.Date(day.Year(), day.Month(), day.Day(), 18, 0, 0, 0, now.Location()), "market_open"
+		if hhmm < 18*60 {
+			return openTime, "market_open"
 		}
-		// After daily reopen → next: market_close tomorrow at 5 PM
 		tomorrow := day.AddDate(0, 0, 1)
-		return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 17, 0, 0, 0, now.Location()), "market_close"
+		return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), closeHour, closeMin, 0, 0, now.Location()), "market_close"
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/benny-conn/brandon-bot/engine"
+	"github.com/benny-conn/brandon-bot/internal/bracket"
 	"github.com/benny-conn/brandon-bot/internal/portfolio"
 	"github.com/benny-conn/brandon-bot/strategy"
 )
@@ -98,7 +99,8 @@ type Engine struct {
 	strategy    strategy.Strategy
 	portfolio   *portfolio.SimulatedPortfolio
 	diagnostics Diagnostics
-	multipliers map[string]float64 // per-symbol point value (nil = all equities)
+	multipliers map[string]float64  // per-symbol point value (nil = all equities)
+	brackets    []bracket.Pending   // active TP/SL brackets
 }
 
 func NewEngine(strat strategy.Strategy, initialCapital float64, opts ...EngineOption) *Engine {
@@ -120,6 +122,34 @@ func (e *Engine) multiplier(symbol string) float64 {
 		}
 	}
 	return 1.0
+}
+
+// checkBrackets evaluates pending TP/SL brackets against the current tick.
+func (e *Engine) checkBrackets(tick strategy.Tick) []Trade {
+	remaining, fills := bracket.CheckAll(e.brackets, tick.Symbol, tick.High, tick.Low)
+	e.brackets = remaining
+
+	var trades []Trade
+	for _, fill := range fills {
+		fill.Timestamp = tick.Timestamp
+
+		mult := e.multiplier(fill.Symbol)
+		var realizedPL float64
+		pos := e.portfolio.Position(fill.Symbol)
+		if pos != nil {
+			if fill.Side == "sell" && pos.Qty > 0 {
+				realizedPL = (fill.Price - pos.AvgCost) * fill.Qty * mult
+			} else if fill.Side == "buy" && pos.Qty < 0 {
+				realizedPL = (pos.AvgCost - fill.Price) * fill.Qty * mult
+			}
+		}
+
+		e.portfolio.ApplyFill(fill)
+		e.strategy.SetPortfolio(e.portfolio)
+		e.strategy.OnFill(fill)
+		trades = append(trades, Trade{Fill: fill, RealizedPL: realizedPL})
+	}
+	return trades
 }
 
 // fillOrders simulates fills for a set of orders using per-symbol prices.
@@ -177,9 +207,15 @@ func (e *Engine) fillOrders(orders []strategy.Order, symbolPrices map[string]flo
 		}
 
 		e.portfolio.ApplyFill(fill)
+		e.strategy.SetPortfolio(e.portfolio)
 		e.strategy.OnFill(fill)
 
 		trades = append(trades, Trade{Fill: fill, RealizedPL: realizedPL})
+
+		// Register TP/SL bracket for simulation on subsequent ticks.
+		if b := bracket.NewFromOrder(order, fillPrice); b != nil {
+			e.brackets = append(e.brackets, *b)
+		}
 	}
 	return trades
 }
@@ -349,6 +385,10 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		// Update market prices so Equity() stays accurate.
 		e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
 
+		// Check pending TP/SL brackets against this tick's price range.
+		bracketTrades := e.checkBrackets(tick)
+		trades = append(trades, bracketTrades...)
+
 		date := tick.Timestamp.UTC().Format("2006-01-02")
 
 		// --- Day boundary handling for strategies with lifecycle hooks ---
@@ -357,7 +397,8 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 				// End of previous day: fire OnMarketClose, then snapshot equity
 				// so the curve reflects the effect of EOD orders (e.g. position flattening).
 				prevDay := days[dayIndex]
-				closeOrders := dsh.OnMarketClose(e.portfolio)
+				e.strategy.SetPortfolio(e.portfolio)
+				closeOrders := dsh.OnMarketClose()
 				if len(closeOrders) > 0 {
 					trades = append(trades, e.fillOrders(closeOrders, prevDay.closes, tick.Timestamp)...)
 				}
@@ -372,7 +413,8 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 			for sym, openPrice := range newDay.opens {
 				e.portfolio.UpdateMarketPrice(sym, openPrice)
 			}
-			openOrders := dsh.OnMarketOpen(e.portfolio)
+			e.strategy.SetPortfolio(e.portfolio)
+			openOrders := dsh.OnMarketOpen()
 			if len(openOrders) > 0 {
 				trades = append(trades, e.fillOrders(openOrders, newDay.opens, tick.Timestamp)...)
 			}
@@ -382,7 +424,8 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		}
 
 		// --- Ask the strategy what to do ---
-		orders := e.strategy.OnBar(baseTimeframe, tick, e.portfolio)
+		e.strategy.SetPortfolio(e.portfolio)
+		orders := e.strategy.OnBar(baseTimeframe, tick)
 		if len(orders) > 0 {
 			trades = append(trades, e.fillOrdersCross(orders, i, ticks, nextSameSymbol, symIndices)...)
 		}
@@ -402,7 +445,8 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 				})
 			}
 			for _, cb := range completedBars {
-				barOrders := e.strategy.OnBar(cb.timeframe, cb.tick, e.portfolio)
+				e.strategy.SetPortfolio(e.portfolio)
+				barOrders := e.strategy.OnBar(cb.timeframe, cb.tick)
 				if len(barOrders) > 0 {
 					trades = append(trades, e.fillOrdersCross(barOrders, i, ticks, nextSameSymbol, symIndices)...)
 				}
@@ -414,7 +458,8 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 	// Fire final market close if the strategy uses daily hooks.
 	if hasDailyHooks && currentDate != "" {
 		lastDay := days[dayIndex]
-		closeOrders := dsh.OnMarketClose(e.portfolio)
+		e.strategy.SetPortfolio(e.portfolio)
+		closeOrders := dsh.OnMarketClose()
 		if len(closeOrders) > 0 {
 			lastTick := ticks[len(ticks)-1]
 			trades = append(trades, e.fillOrders(closeOrders, lastDay.closes, lastTick.Timestamp)...)

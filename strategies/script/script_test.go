@@ -62,7 +62,8 @@ func runScript(t *testing.T, src string) []strategy.Order {
 		Close:     102,
 		Volume:    1000,
 	}
-	return s.OnBar("1m", tick, newMockPortfolio())
+	s.SetPortfolio(newMockPortfolio())
+	return s.OnBar("1m", tick)
 }
 
 // ---------------------------------------------------------------------------
@@ -445,8 +446,8 @@ function onBar(timeframe, tick, portfolio) {
 		qty: 10,
 		limitPrice: 150.50,
 		stopPrice: 149.00,
-		stopLoss: 145.00,
-		takeProfit: 160.00,
+		slDistance: 145.00,
+		tpDistance: 160.00,
 		reason: "breakout signal"
 	}];
 }
@@ -474,11 +475,11 @@ function onBar(timeframe, tick, portfolio) {
 	if !approxEqual(o.StopPrice, 149.00, epsilon) {
 		t.Errorf("stopPrice: got %f, want 149.00", o.StopPrice)
 	}
-	if !approxEqual(o.StopLoss, 145.00, epsilon) {
-		t.Errorf("stopLoss: got %f, want 145.00", o.StopLoss)
+	if !approxEqual(o.SLDistance, 145.00, epsilon) {
+		t.Errorf("slDistance: got %f, want 145.00", o.SLDistance)
 	}
-	if !approxEqual(o.TakeProfit, 160.00, epsilon) {
-		t.Errorf("takeProfit: got %f, want 160.00", o.TakeProfit)
+	if !approxEqual(o.TPDistance, 160.00, epsilon) {
+		t.Errorf("tpDistance: got %f, want 160.00", o.TPDistance)
 	}
 	if o.Reason != "breakout signal" {
 		t.Errorf("reason: got %q, want %q", o.Reason, "breakout signal")
@@ -490,7 +491,7 @@ func TestParseOrders_MultipleOrders(t *testing.T) {
 function onBar(timeframe, tick, portfolio) {
 	return [
 		{ symbol: "AAPL", side: "buy", qty: 5, orderType: "limit", limitPrice: 150, reason: "entry" },
-		{ symbol: "GOOG", side: "sell", qty: 3, orderType: "market", stopLoss: 100, takeProfit: 200 }
+		{ symbol: "GOOG", side: "sell", qty: 3, orderType: "market", slDistance: 100, tpDistance: 200 }
 	];
 }
 `
@@ -501,11 +502,11 @@ function onBar(timeframe, tick, portfolio) {
 	if orders[0].Symbol != "AAPL" || orders[0].Reason != "entry" {
 		t.Errorf("order[0] unexpected: %+v", orders[0])
 	}
-	if orders[1].Symbol != "GOOG" || !approxEqual(orders[1].StopLoss, 100.0, epsilon) {
+	if orders[1].Symbol != "GOOG" || !approxEqual(orders[1].SLDistance, 100.0, epsilon) {
 		t.Errorf("order[1] unexpected: %+v", orders[1])
 	}
-	if !approxEqual(orders[1].TakeProfit, 200.0, epsilon) {
-		t.Errorf("order[1] takeProfit: got %f, want 200.0", orders[1].TakeProfit)
+	if !approxEqual(orders[1].TPDistance, 200.0, epsilon) {
+		t.Errorf("order[1] tpDistance: got %f, want 200.0", orders[1].TPDistance)
 	}
 }
 
@@ -544,8 +545,8 @@ function onBar(timeframe, tick, portfolio) {
 		qty: 1,
 		limitPrice: 100,
 		stopPrice: 95,
-		stopLoss: 90,
-		takeProfit: 110
+		slDistance: 90,
+		tpDistance: 110
 	}];
 }
 `
@@ -560,11 +561,11 @@ function onBar(timeframe, tick, portfolio) {
 	if !approxEqual(o.StopPrice, 95.0, epsilon) {
 		t.Errorf("stopPrice (int): got %f, want 95.0", o.StopPrice)
 	}
-	if !approxEqual(o.StopLoss, 90.0, epsilon) {
-		t.Errorf("stopLoss (int): got %f, want 90.0", o.StopLoss)
+	if !approxEqual(o.SLDistance, 90.0, epsilon) {
+		t.Errorf("slDistance (int): got %f, want 90.0", o.SLDistance)
 	}
-	if !approxEqual(o.TakeProfit, 110.0, epsilon) {
-		t.Errorf("takeProfit (int): got %f, want 110.0", o.TakeProfit)
+	if !approxEqual(o.TPDistance, 110.0, epsilon) {
+		t.Errorf("tpDistance (int): got %f, want 110.0", o.TPDistance)
 	}
 }
 
@@ -704,7 +705,7 @@ function onBar(timeframe, tick, portfolio) {
 		qty: result[0][0],
 		limitPrice: result[1][0],
 		stopPrice: result[2][0],
-		stopLoss: result[1][1]
+		slDistance: result[1][1]
 	}];
 }
 `
@@ -721,8 +722,8 @@ function onBar(timeframe, tick, portfolio) {
 	if !approxEqual(orders[0].StopPrice, 1.0, epsilon) {
 		t.Errorf("normalize [2][0]: got %f, want 1.0", orders[0].StopPrice)
 	}
-	if !approxEqual(orders[0].StopLoss, 0.5, epsilon) {
-		t.Errorf("normalize [1][1]: got %f, want 0.5", orders[0].StopLoss)
+	if !approxEqual(orders[0].SLDistance, 0.5, epsilon) {
+		t.Errorf("normalize [1][1]: got %f, want 0.5", orders[0].SLDistance)
 	}
 }
 
@@ -767,7 +768,7 @@ function onBar(timeframe, tick, portfolio) {
 
 func TestPortfolioAccess(t *testing.T) {
 	src := `
-function onBar(timeframe, tick, portfolio) {
+function onBar(timeframe, tick) {
 	var c = portfolio.cash();
 	var e = portfolio.equity();
 	var pl = portfolio.totalPL();
@@ -793,7 +794,8 @@ function onBar(timeframe, tick, portfolio) {
 		Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 		Open:      100, High: 105, Low: 95, Close: 102, Volume: 1000,
 	}
-	orders := s.OnBar("1m", tick, p)
+	s.SetPortfolio(p)
+	orders := s.OnBar("1m", tick)
 	if len(orders) != 1 {
 		t.Fatalf("expected 1 order, got %d", len(orders))
 	}
@@ -810,7 +812,7 @@ function onBar(timeframe, tick, portfolio) {
 
 func TestPortfolioPosition(t *testing.T) {
 	src := `
-function onBar(timeframe, tick, portfolio) {
+function onBar(timeframe, tick) {
 	var pos = portfolio.position("AAPL");
 	if (!pos) return [];
 	return [{
@@ -836,7 +838,8 @@ function onBar(timeframe, tick, portfolio) {
 		Timestamp: time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC),
 		Open:      100, High: 105, Low: 95, Close: 102, Volume: 1000,
 	}
-	orders := s.OnBar("1m", tick, p)
+	s.SetPortfolio(p)
+	orders := s.OnBar("1m", tick)
 	if len(orders) != 1 {
 		t.Fatalf("expected 1 order, got %d", len(orders))
 	}

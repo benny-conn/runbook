@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/benny-conn/brandon-bot/internal/bracket"
 	"github.com/benny-conn/brandon-bot/internal/portfolio"
 	"github.com/benny-conn/brandon-bot/provider"
 	"github.com/benny-conn/brandon-bot/strategy"
@@ -103,6 +104,7 @@ type pendingStop struct {
 	order strategy.Order
 }
 
+
 // Engine is the paper trading engine. It streams live data from the provider,
 // calls the strategy on each event, submits returned orders, and processes
 // async fill events — all serialized through a single event loop.
@@ -132,6 +134,9 @@ type Engine struct {
 	// warmingUp is true during recovery replay — orders are simulated locally
 	// instead of being sent to the broker.
 	warmingUp bool
+
+	// warmupBrackets tracks TP/SL brackets during warmup for simulation.
+	warmupBrackets []bracket.Pending
 
 	// contractSpecs caches per-symbol contract specs queried during Run().
 	// Used for TP/SL distance-to-price conversion and passed to strategies.
@@ -465,9 +470,11 @@ func (e *Engine) handleBar(timeframe string, tick strategy.Tick) {
 	if !e.warmingUp && timeframe == e.baseTimeframe {
 		e.portfolio.IncrementHoldingBars(tick.Symbol)
 	}
-	orders := e.strategy.OnBar(timeframe, tick, e.portfolio)
+	e.strategy.SetPortfolio(e.portfolio)
+	orders := e.strategy.OnBar(timeframe, tick)
 	if e.warmingUp {
-		simulateFills(e.strategy, e.portfolio, orders, tick)
+		e.checkWarmupBrackets(tick)
+		simulateFills(e.strategy, e.portfolio, orders, tick, e)
 	} else {
 		e.checkStops(tick.Symbol, tick.Close)
 		e.submitOrders(orders)
@@ -486,25 +493,29 @@ func (e *Engine) onTrade(trade strategy.Trade) {
 	e.portfolio.UpdateMarketPrice(trade.Symbol, trade.Price)
 	e.checkStops(trade.Symbol, trade.Price)
 	ts := e.strategy.(strategy.TradeSubscriber) // safe: only called when strategy implements it
-	e.submitOrders(ts.OnTrade(trade, e.portfolio))
+	e.strategy.SetPortfolio(e.portfolio)
+	e.submitOrders(ts.OnTrade(trade))
 }
 
 func (e *Engine) onQuote(quote strategy.Quote) {
 	e.stats.quotesReceived++
 	qs := e.strategy.(strategy.QuoteSubscriber) // safe: only called when strategy implements it
-	e.submitOrders(qs.OnQuote(quote, e.portfolio))
+	e.strategy.SetPortfolio(e.portfolio)
+	e.submitOrders(qs.OnQuote(quote))
 }
 
 func (e *Engine) onMarketOpen() {
 	dsh := e.strategy.(strategy.DailySessionHandler) // safe: only called when strategy implements it
 	log.Println("paper engine: market open — calling OnMarketOpen")
-	e.submitOrders(dsh.OnMarketOpen(e.portfolio))
+	e.strategy.SetPortfolio(e.portfolio)
+	e.submitOrders(dsh.OnMarketOpen())
 }
 
 func (e *Engine) onMarketClose() {
 	dsh := e.strategy.(strategy.DailySessionHandler) // safe: only called when strategy implements it
 	log.Println("paper engine: market close — calling OnMarketClose")
-	e.submitOrders(dsh.OnMarketClose(e.portfolio))
+	e.strategy.SetPortfolio(e.portfolio)
+	e.submitOrders(dsh.OnMarketClose())
 
 	// Auto-flatten any remaining positions if configured.
 	if e.config.FlattenAtClose {
@@ -544,6 +555,7 @@ func (e *Engine) onFill(fill strategy.Fill) {
 
 	e.portfolio.ApplyFill(fill)
 	e.portfolio.UpdateMarketPrice(fill.Symbol, fill.Price)
+	e.strategy.SetPortfolio(e.portfolio)
 	e.strategy.OnFill(fill)
 
 	log.Printf("fill: %s %s qty=%.2f @ $%.2f pl=%.4f", fill.Side, fill.Symbol, fill.Qty, fill.Price, fill.RealizedPL)
@@ -627,7 +639,6 @@ func parseHHMM(s string) (int, int) {
 func (e *Engine) submitOrders(orders []strategy.Order) {
 	orders = e.validateOrders(orders)
 	for _, order := range orders {
-		e.resolveBrackets(&order)
 
 		// Intercept stop/stop_limit orders when provider needs client-side management.
 		if e.clientSideStops && (order.OrderType == "stop" || order.OrderType == "stop_limit") {
@@ -664,68 +675,20 @@ func (e *Engine) validateOrders(orders []strategy.Order) []strategy.Order {
 			o.Qty = float64(e.config.MaxContracts)
 		}
 
-		// Prevent duplicate entries: drop entry orders when already positioned in the same direction.
-		pos := e.portfolio.Position(o.Symbol)
-		if pos != nil {
-			if o.Side == "buy" && pos.Qty > 0 {
-				log.Printf("guard: dropping buy %s — already long %.0f", o.Symbol, pos.Qty)
-				continue
-			}
-			if o.Side == "sell" && pos.Qty < 0 {
-				log.Printf("guard: dropping sell %s — already short %.0f", o.Symbol, pos.Qty)
-				continue
-			}
-		}
-
 		valid = append(valid, o)
 	}
 	return valid
 }
 
-// resolveBrackets converts distance-based TP/SL to absolute prices.
-// Uses the last known market price as the entry estimate for market orders.
-func (e *Engine) resolveBrackets(order *strategy.Order) {
-	if order.TPDistance == 0 && order.SLDistance == 0 {
-		return
-	}
-
-	// Estimate entry price: use limit price if available, otherwise last market price.
-	entryEstimate := 0.0
-	if order.OrderType == "limit" && order.LimitPrice > 0 {
-		entryEstimate = order.LimitPrice
-	} else {
-		pos := e.portfolio.Position(order.Symbol)
-		if pos != nil && pos.MarketValue != 0 {
-			// Use current market price derived from portfolio.
-			if pos.Qty > 0 {
-				entryEstimate = pos.AvgCost + pos.UnrealizedPL/(pos.Qty*e.multiplier(order.Symbol))
-			} else if pos.Qty < 0 {
-				entryEstimate = pos.AvgCost - pos.UnrealizedPL/(-pos.Qty*e.multiplier(order.Symbol))
-			}
-		}
-		// Fallback: use the last bar close from stats.
-		if entryEstimate == 0 {
-			// We don't have a direct lastPrice accessor, but the portfolio's market
-			// value is updated each tick. For a new position (no existing pos), we
-			// can't derive price. This is acceptable — distance brackets are most
-			// useful when the entry price is known (limit orders) or we have a position.
-			return
-		}
-	}
-
-	if order.TPDistance > 0 && order.TakeProfit == 0 {
-		if order.Side == "buy" {
-			order.TakeProfit = entryEstimate + order.TPDistance
-		} else {
-			order.TakeProfit = entryEstimate - order.TPDistance
-		}
-	}
-	if order.SLDistance > 0 && order.StopLoss == 0 {
-		if order.Side == "buy" {
-			order.StopLoss = entryEstimate - order.SLDistance
-		} else {
-			order.StopLoss = entryEstimate + order.SLDistance
-		}
+// checkWarmupBrackets simulates TP/SL bracket fills during warmup.
+func (e *Engine) checkWarmupBrackets(tick strategy.Tick) {
+	remaining, fills := bracket.CheckAll(e.warmupBrackets, tick.Symbol, tick.High, tick.Low)
+	e.warmupBrackets = remaining
+	for _, fill := range fills {
+		fill.Timestamp = tick.Timestamp
+		e.portfolio.ApplyFill(fill)
+		e.strategy.SetPortfolio(e.portfolio)
+		e.strategy.OnFill(fill)
 	}
 }
 
