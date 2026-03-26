@@ -158,6 +158,29 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 		}
 	}
 
+	// Notify the strategy that live trading is about to begin.
+	// This fires exactly once, after warmup and portfolio reset.
+	if lh, ok := e.strategy.(strategy.LiveHandler); ok {
+		livePositions := make([]strategy.Position, 0, len(positions))
+		for _, pos := range positions {
+			side := "flat"
+			if pos.Qty > 0 {
+				side = "long"
+			} else if pos.Qty < 0 {
+				side = "short"
+			}
+			livePositions = append(livePositions, strategy.Position{
+				Symbol:     pos.Symbol,
+				Qty:        pos.Qty,
+				AvgCost:    pos.AvgEntryPrice,
+				EntryPrice: pos.AvgEntryPrice,
+				Side:       side,
+			})
+		}
+		lh.OnLive(strategy.LiveContext{Positions: livePositions})
+		log.Println("recovery: onLive called")
+	}
+
 	log.Println("recovery: complete — ready to trade")
 	return nil
 }

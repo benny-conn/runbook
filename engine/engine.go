@@ -61,6 +61,13 @@ type Config struct {
 	// CashOverride, when > 0, overrides the broker's GetAccount().Cash during
 	// recovery. Use together with Positions for fully backend-controlled recovery.
 	CashOverride float64
+
+	// MaxContracts caps the qty on any single order (0 = no limit).
+	MaxContracts int
+
+	// FlattenAtClose auto-flattens all positions at market close if the strategy
+	// doesn't fully close them itself.
+	FlattenAtClose bool
 }
 
 func DefaultConfig(capital float64) Config {
@@ -125,6 +132,10 @@ type Engine struct {
 	// warmingUp is true during recovery replay — orders are simulated locally
 	// instead of being sent to the broker.
 	warmingUp bool
+
+	// contractSpecs caches per-symbol contract specs queried during Run().
+	// Used for TP/SL distance-to-price conversion and passed to strategies.
+	contractSpecs map[string]provider.ContractSpec
 
 	// Observability counters for periodic status logging.
 	stats engineStats
@@ -205,6 +216,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 
 	// If the provider supports contract specs (futures), query multipliers
 	// for all symbols and configure the portfolio accordingly.
+	e.contractSpecs = make(map[string]provider.ContractSpec)
 	if csp, ok := e.md.(provider.ContractSpecProvider); ok {
 		multipliers := make(map[string]float64)
 		for _, sym := range symbols {
@@ -213,6 +225,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 				log.Printf("paper engine: contract spec for %s: %v (defaulting to equity)", sym, err)
 				continue
 			}
+			e.contractSpecs[sym] = spec
 			if spec.PointValue > 1.0 {
 				multipliers[sym] = spec.PointValue
 				log.Printf("paper engine: %s point_value=%.2f (tick_size=%.4f tick_value=%.4f)",
@@ -222,6 +235,20 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		if len(multipliers) > 0 {
 			e.portfolio.SetMultipliers(multipliers)
 		}
+	}
+
+	// Pass contract specs to strategy if it supports it.
+	if csc, ok := e.strategy.(strategy.ContractSpecConsumer); ok {
+		stratSpecs := make(map[string]strategy.ContractSpec)
+		for sym, spec := range e.contractSpecs {
+			stratSpecs[sym] = strategy.ContractSpec{
+				Symbol:     spec.Symbol,
+				TickSize:   spec.TickSize,
+				TickValue:  spec.TickValue,
+				PointValue: spec.PointValue,
+			}
+		}
+		csc.SetContractSpecs(stratSpecs)
 	}
 
 	// Read timeframes from the strategy (single source of truth).
@@ -435,6 +462,9 @@ func (e *Engine) handleBar(timeframe string, tick strategy.Tick) {
 	}
 
 	e.portfolio.UpdateMarketPrice(tick.Symbol, tick.Close)
+	if !e.warmingUp && timeframe == e.baseTimeframe {
+		e.portfolio.IncrementHoldingBars(tick.Symbol)
+	}
 	orders := e.strategy.OnBar(timeframe, tick, e.portfolio)
 	if e.warmingUp {
 		simulateFills(e.strategy, e.portfolio, orders, tick)
@@ -475,6 +505,34 @@ func (e *Engine) onMarketClose() {
 	dsh := e.strategy.(strategy.DailySessionHandler) // safe: only called when strategy implements it
 	log.Println("paper engine: market close — calling OnMarketClose")
 	e.submitOrders(dsh.OnMarketClose(e.portfolio))
+
+	// Auto-flatten any remaining positions if configured.
+	if e.config.FlattenAtClose {
+		e.flattenAll("market close auto-flatten")
+	}
+}
+
+// flattenAll closes all open positions with market orders.
+func (e *Engine) flattenAll(reason string) {
+	for _, pos := range e.portfolio.Positions() {
+		if pos.Qty == 0 {
+			continue
+		}
+		side := "sell"
+		qty := pos.Qty
+		if pos.Qty < 0 {
+			side = "buy"
+			qty = -pos.Qty
+		}
+		log.Printf("auto-flatten: %s %s qty=%.2f reason=%q", side, pos.Symbol, qty, reason)
+		e.placeOrder(strategy.Order{
+			Symbol:    pos.Symbol,
+			Side:      side,
+			Qty:       qty,
+			OrderType: "market",
+			Reason:    reason,
+		})
+	}
 }
 
 func (e *Engine) onFill(fill strategy.Fill) {
@@ -567,7 +625,10 @@ func parseHHMM(s string) (int, int) {
 }
 
 func (e *Engine) submitOrders(orders []strategy.Order) {
+	orders = e.validateOrders(orders)
 	for _, order := range orders {
+		e.resolveBrackets(&order)
+
 		// Intercept stop/stop_limit orders when provider needs client-side management.
 		if e.clientSideStops && (order.OrderType == "stop" || order.OrderType == "stop_limit") {
 			e.pendingStops = append(e.pendingStops, pendingStop{order: order})
@@ -580,6 +641,100 @@ func (e *Engine) submitOrders(orders []strategy.Order) {
 		}
 		e.placeOrder(order)
 	}
+}
+
+// validateOrders applies engine-level guards, dropping invalid or duplicate orders.
+func (e *Engine) validateOrders(orders []strategy.Order) []strategy.Order {
+	valid := make([]strategy.Order, 0, len(orders))
+	for _, o := range orders {
+		// Sanity: reject empty symbol or non-positive qty.
+		if o.Symbol == "" {
+			log.Printf("guard: dropping order with empty symbol")
+			continue
+		}
+		if o.Qty <= 0 {
+			log.Printf("guard: dropping %s %s order with qty=%.2f", o.Side, o.Symbol, o.Qty)
+			continue
+		}
+
+		// Cap qty if MaxContracts is configured.
+		if e.config.MaxContracts > 0 && o.Qty > float64(e.config.MaxContracts) {
+			log.Printf("guard: capping %s %s qty from %.0f to %d (MaxContracts)",
+				o.Side, o.Symbol, o.Qty, e.config.MaxContracts)
+			o.Qty = float64(e.config.MaxContracts)
+		}
+
+		// Prevent duplicate entries: drop entry orders when already positioned in the same direction.
+		pos := e.portfolio.Position(o.Symbol)
+		if pos != nil {
+			if o.Side == "buy" && pos.Qty > 0 {
+				log.Printf("guard: dropping buy %s — already long %.0f", o.Symbol, pos.Qty)
+				continue
+			}
+			if o.Side == "sell" && pos.Qty < 0 {
+				log.Printf("guard: dropping sell %s — already short %.0f", o.Symbol, pos.Qty)
+				continue
+			}
+		}
+
+		valid = append(valid, o)
+	}
+	return valid
+}
+
+// resolveBrackets converts distance-based TP/SL to absolute prices.
+// Uses the last known market price as the entry estimate for market orders.
+func (e *Engine) resolveBrackets(order *strategy.Order) {
+	if order.TPDistance == 0 && order.SLDistance == 0 {
+		return
+	}
+
+	// Estimate entry price: use limit price if available, otherwise last market price.
+	entryEstimate := 0.0
+	if order.OrderType == "limit" && order.LimitPrice > 0 {
+		entryEstimate = order.LimitPrice
+	} else {
+		pos := e.portfolio.Position(order.Symbol)
+		if pos != nil && pos.MarketValue != 0 {
+			// Use current market price derived from portfolio.
+			if pos.Qty > 0 {
+				entryEstimate = pos.AvgCost + pos.UnrealizedPL/(pos.Qty*e.multiplier(order.Symbol))
+			} else if pos.Qty < 0 {
+				entryEstimate = pos.AvgCost - pos.UnrealizedPL/(-pos.Qty*e.multiplier(order.Symbol))
+			}
+		}
+		// Fallback: use the last bar close from stats.
+		if entryEstimate == 0 {
+			// We don't have a direct lastPrice accessor, but the portfolio's market
+			// value is updated each tick. For a new position (no existing pos), we
+			// can't derive price. This is acceptable — distance brackets are most
+			// useful when the entry price is known (limit orders) or we have a position.
+			return
+		}
+	}
+
+	if order.TPDistance > 0 && order.TakeProfit == 0 {
+		if order.Side == "buy" {
+			order.TakeProfit = entryEstimate + order.TPDistance
+		} else {
+			order.TakeProfit = entryEstimate - order.TPDistance
+		}
+	}
+	if order.SLDistance > 0 && order.StopLoss == 0 {
+		if order.Side == "buy" {
+			order.StopLoss = entryEstimate - order.SLDistance
+		} else {
+			order.StopLoss = entryEstimate + order.SLDistance
+		}
+	}
+}
+
+// multiplier returns the point value for a symbol (1.0 for equities).
+func (e *Engine) multiplier(symbol string) float64 {
+	if spec, ok := e.contractSpecs[symbol]; ok && spec.PointValue > 0 {
+		return spec.PointValue
+	}
+	return 1.0
 }
 
 func (e *Engine) placeOrder(order strategy.Order) {

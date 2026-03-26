@@ -25,12 +25,14 @@ type SimulatedPortfolio struct {
 	realizedPL  float64
 	positions   map[string]*strategy.Position
 	multipliers map[string]float64 // symbol → point value (1.0 for equities)
+	holdingBars map[string]int     // symbol → bars since position opened
 }
 
 func NewSimulatedPortfolio(initialCash float64) *SimulatedPortfolio {
 	return &SimulatedPortfolio{
-		cash:      initialCash,
-		positions: make(map[string]*strategy.Position),
+		cash:        initialCash,
+		positions:   make(map[string]*strategy.Position),
+		holdingBars: make(map[string]int),
 	}
 }
 
@@ -90,6 +92,15 @@ func (p *SimulatedPortfolio) Position(symbol string) *strategy.Position {
 	}
 	// Return a copy so callers can't mutate internal state.
 	cp := *pos
+	cp.EntryPrice = cp.AvgCost
+	cp.HoldingBars = p.holdingBars[symbol]
+	if cp.Qty > 0 {
+		cp.Side = "long"
+	} else if cp.Qty < 0 {
+		cp.Side = "short"
+	} else {
+		cp.Side = "flat"
+	}
 	return &cp
 }
 
@@ -98,7 +109,17 @@ func (p *SimulatedPortfolio) Positions() []strategy.Position {
 	defer p.mu.RUnlock()
 	result := make([]strategy.Position, 0, len(p.positions))
 	for _, pos := range p.positions {
-		result = append(result, *pos)
+		cp := *pos
+		cp.EntryPrice = cp.AvgCost
+		cp.HoldingBars = p.holdingBars[cp.Symbol]
+		if cp.Qty > 0 {
+			cp.Side = "long"
+		} else if cp.Qty < 0 {
+			cp.Side = "short"
+		} else {
+			cp.Side = "flat"
+		}
+		result = append(result, cp)
 	}
 	return result
 }
@@ -111,6 +132,15 @@ func (p *SimulatedPortfolio) TotalPL() float64 {
 		total += pos.UnrealizedPL
 	}
 	return total
+}
+
+// IncrementHoldingBars increments the bar counter for a symbol's open position.
+func (p *SimulatedPortfolio) IncrementHoldingBars(symbol string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.positions[symbol]; ok {
+		p.holdingBars[symbol]++
+	}
 }
 
 // ComputeFillPL returns the realized P&L for a fill based on the current position.
@@ -192,6 +222,7 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 				Qty:     fill.Qty,
 				AvgCost: fill.Price,
 			}
+			p.holdingBars[fill.Symbol] = 0
 		} else if pos.Qty < 0 {
 			// Covering a short position — realize P&L on the covered portion.
 			coveredQty := fill.Qty
@@ -207,9 +238,11 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 			pos.Qty += fill.Qty
 			if pos.Qty == 0 {
 				delete(p.positions, fill.Symbol)
+				delete(p.holdingBars, fill.Symbol)
 			} else if pos.Qty > 0 {
 				// Buy exceeded short qty — flipped to long. Reset avg cost.
 				pos.AvgCost = fill.Price
+				p.holdingBars[fill.Symbol] = 0
 				if !futures {
 					// For equities, the excess buy cost is already deducted above.
 				}
@@ -232,6 +265,7 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 				Qty:     -fill.Qty,
 				AvgCost: fill.Price,
 			}
+			p.holdingBars[fill.Symbol] = 0
 			return
 		}
 		wasLong := pos.Qty > 0
@@ -253,9 +287,11 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 		pos.Qty -= fill.Qty
 		if pos.Qty == 0 {
 			delete(p.positions, fill.Symbol)
+			delete(p.holdingBars, fill.Symbol)
 		} else if pos.Qty < 0 && wasLong {
 			// Sell exceeded long qty — flipped to short. Reset avg cost.
 			pos.AvgCost = fill.Price
+			p.holdingBars[fill.Symbol] = 0
 		}
 	}
 }

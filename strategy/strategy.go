@@ -24,8 +24,10 @@ type Order struct {
 	OrderType  string  // "market", "limit", "stop", or "stop_limit"
 	LimitPrice float64 // limit price for limit and stop-limit orders
 	StopPrice  float64 // trigger price for stop and stop-limit orders
-	StopLoss   float64 // broker-native bracket stop loss price (0 = disabled)
-	TakeProfit float64 // broker-native bracket take profit price (0 = disabled)
+	StopLoss   float64 // broker-native bracket stop loss — absolute price (0 = disabled)
+	TakeProfit float64 // broker-native bracket take profit — absolute price (0 = disabled)
+	SLDistance float64 // stop loss distance in price points from entry (0 = disabled)
+	TPDistance float64 // take profit distance in price points from entry (0 = disabled)
 	Reason     string  // for logging/debugging
 }
 
@@ -46,6 +48,9 @@ type Position struct {
 	AvgCost      float64
 	MarketValue  float64
 	UnrealizedPL float64
+	EntryPrice   float64 // actual fill price (same as AvgCost for single-fill entries)
+	Side         string  // "long", "short", or "flat"
+	HoldingBars  int     // number of bars since position was opened
 }
 
 // Portfolio is a read-only view of the current account state passed into OnBar.
@@ -175,6 +180,37 @@ type Shutdowner interface {
 // this, only CLI symbols are used.
 type SymbolResolver interface {
 	ResolveSymbols(ctx InitContext) ([]string, error)
+}
+
+// LiveContext is passed to LiveHandler.OnLive when the engine transitions
+// from warmup to live trading.
+type LiveContext struct {
+	Positions []Position // current broker positions at go-live time
+}
+
+// LiveHandler is an optional interface a strategy can implement to receive
+// a one-time callback when live trading begins (after warmup replay and
+// portfolio reset). Use this to clear warmup artifacts (halted flags, daily
+// P&L) and inspect the real broker state before the first live bar.
+type LiveHandler interface {
+	OnLive(ctx LiveContext)
+}
+
+// ContractSpecConsumer is an optional interface a strategy can implement to
+// receive contract specifications (tick size, point value) for traded symbols.
+// The engine calls SetContractSpecs after querying the provider during startup.
+type ContractSpecConsumer interface {
+	SetContractSpecs(specs map[string]ContractSpec)
+}
+
+// ContractSpec describes a tradeable instrument's tick and value properties.
+// For equities and crypto: TickSize=0.01, PointValue=1.0.
+// For futures: PointValue > 1 (e.g. MNQ=2.0, ES=50.0).
+type ContractSpec struct {
+	Symbol     string
+	TickSize   float64 // minimum price increment
+	TickValue  float64 // dollar value per tick
+	PointValue float64 // dollar value per full point = tickValue / tickSize
 }
 
 // AssetQuery controls filtering for SearchAssets.

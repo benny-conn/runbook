@@ -40,6 +40,7 @@ type ScriptStrategy struct {
 	onInit         goja.Callable
 	onMarketOpen   goja.Callable
 	onMarketClose  goja.Callable
+	onLive         goja.Callable
 	onExit         goja.Callable
 	resolveSymbols goja.Callable
 	timeframesFn   goja.Callable
@@ -47,6 +48,7 @@ type ScriptStrategy struct {
 	runtimeErrors  []string
 	errorSeen      map[string]bool
 	dataGlobal     *dataGlobal // nil if no MarketData provider
+	contractSpecs  map[string]strategy.ContractSpec
 }
 
 // New creates a ScriptStrategy by compiling src in a Goja runtime.
@@ -218,6 +220,7 @@ func New(name, src string, config map[string]string, opts ...Option) (*ScriptStr
 		onInit:         extractOptional("onInit"),
 		onMarketOpen:   extractOptional("onMarketOpen"),
 		onMarketClose:  extractOptional("onMarketClose"),
+		onLive:         extractOptional("onLive"),
 		onExit:         extractOptional("onExit"),
 		resolveSymbols: extractOptional("resolveSymbols"),
 		timeframesFn:   extractOptional("timeframes"),
@@ -567,6 +570,70 @@ func (s *ScriptStrategy) OnExit() {
 }
 
 // ---------------------------------------------------------------------------
+// strategy.LiveHandler (optional)
+// ---------------------------------------------------------------------------
+
+// OnLive implements strategy.LiveHandler. Called once after warmup completes.
+func (s *ScriptStrategy) OnLive(ctx strategy.LiveContext) {
+	if s.onLive == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	positions := make([]interface{}, len(ctx.Positions))
+	for i, pos := range ctx.Positions {
+		positions[i] = map[string]interface{}{
+			"symbol":     pos.Symbol,
+			"qty":        pos.Qty,
+			"avgCost":    pos.AvgCost,
+			"entryPrice": pos.EntryPrice,
+			"side":       pos.Side,
+		}
+	}
+
+	arg := s.vm.NewObject()
+	arg.Set("positions", positions)
+
+	if _, err := s.onLive(goja.Undefined(), arg); err != nil {
+		fmt.Printf("script onLive error: %v\n", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// strategy.ContractSpecConsumer (optional)
+// ---------------------------------------------------------------------------
+
+// SetContractSpecs implements strategy.ContractSpecConsumer.
+// Stores specs and injects the getContract() JS global.
+func (s *ScriptStrategy) SetContractSpecs(specs map[string]strategy.ContractSpec) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.contractSpecs = specs
+
+	s.vm.Set("getContract", func(call goja.FunctionCall) goja.Value {
+		sym := call.Argument(0).String()
+		spec, ok := s.contractSpecs[sym]
+		if !ok {
+			// Default for equities/crypto.
+			return s.vm.ToValue(map[string]interface{}{
+				"symbol":     sym,
+				"tickSize":   0.01,
+				"tickValue":  0.01,
+				"pointValue": 1.0,
+			})
+		}
+		return s.vm.ToValue(map[string]interface{}{
+			"symbol":     spec.Symbol,
+			"tickSize":   spec.TickSize,
+			"tickValue":  spec.TickValue,
+			"pointValue": spec.PointValue,
+		})
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -588,6 +655,9 @@ func (s *ScriptStrategy) makePortfolioObj(p strategy.Portfolio) goja.Value {
 		posObj.Set("avgCost", pos.AvgCost)
 		posObj.Set("marketValue", pos.MarketValue)
 		posObj.Set("unrealizedPL", pos.UnrealizedPL)
+		posObj.Set("entryPrice", pos.EntryPrice)
+		posObj.Set("side", pos.Side)
+		posObj.Set("holdingBars", pos.HoldingBars)
 		return posObj
 	})
 	obj.Set("positions", func(goja.FunctionCall) goja.Value {
@@ -600,6 +670,9 @@ func (s *ScriptStrategy) makePortfolioObj(p strategy.Portfolio) goja.Value {
 				"avgCost":      pos.AvgCost,
 				"marketValue":  pos.MarketValue,
 				"unrealizedPL": pos.UnrealizedPL,
+				"entryPrice":   pos.EntryPrice,
+				"side":         pos.Side,
+				"holdingBars":  pos.HoldingBars,
 			}
 			arr[i] = m
 		}
@@ -651,6 +724,12 @@ func (s *ScriptStrategy) parseOrders(val goja.Value) []strategy.Order {
 		}
 		if v := getFloatField(m, "takeProfit"); v != 0 {
 			o.TakeProfit = v
+		}
+		if v := getFloatField(m, "slDistance"); v != 0 {
+			o.SLDistance = v
+		}
+		if v := getFloatField(m, "tpDistance"); v != 0 {
+			o.TPDistance = v
 		}
 		if v, ok := m["reason"].(string); ok {
 			o.Reason = v
