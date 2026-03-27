@@ -47,5 +47,14 @@
     "account_id": 1234567890
   },
 
+  "rithmic": {
+    "uri": "wss://rituz00100.rithmic.com:443",
+    "system_name": "Rithmic Test",
+    "username": "",
+    "password": "",
+    "account_id": "",
+    "exchange": "TopStep Trader"
+  },
+
   "strategy": {}
 }
