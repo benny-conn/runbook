@@ -95,13 +95,21 @@ func WithMultipliers(m map[string]float64) EngineOption {
 	}
 }
 
+// WithFlattenAtClose enables auto-flattening all positions at each day boundary.
+func WithFlattenAtClose() EngineOption {
+	return func(e *Engine) {
+		e.flattenAtClose = true
+	}
+}
+
 // Engine runs a strategy against a sorted slice of historical ticks.
 type Engine struct {
-	strategy     strategy.Strategy
-	portfolio    *portfolio.SimulatedPortfolio
-	diagnostics  Diagnostics
-	multipliers  map[string]float64  // per-symbol point value (nil = all equities)
-	brackets     []bracket.Pending   // active TP/SL brackets
+	strategy       strategy.Strategy
+	portfolio      *portfolio.SimulatedPortfolio
+	diagnostics    Diagnostics
+	multipliers    map[string]float64  // per-symbol point value (nil = all equities)
+	brackets       []bracket.Pending   // active TP/SL brackets
+	flattenAtClose bool
 	barBuffer    *barbuf.Buffer
 	dailyTracker *barbuf.DailyTracker
 }
@@ -178,10 +186,51 @@ func (e *Engine) checkBrackets(tick strategy.Tick) []Trade {
 	return trades
 }
 
+// flattenAll closes all open positions at the given prices.
+func (e *Engine) flattenAll(prices map[string]float64, fillTime time.Time) []Trade {
+	var orders []strategy.Order
+	for _, pos := range e.portfolio.Positions() {
+		if pos.Qty == 0 {
+			continue
+		}
+		side := "sell"
+		qty := pos.Qty
+		if pos.Qty < 0 {
+			side = "buy"
+			qty = -pos.Qty
+		}
+		orders = append(orders, strategy.Order{
+			Symbol:    pos.Symbol,
+			Side:      side,
+			Qty:       qty,
+			OrderType: "market",
+			Reason:    "flatten at close",
+		})
+	}
+	if len(orders) == 0 {
+		return nil
+	}
+	return e.fillOrders(orders, prices, fillTime)
+}
+
+// validateOrders filters out invalid orders, matching the live engine's guards.
+func (e *Engine) validateOrders(orders []strategy.Order) []strategy.Order {
+	valid := make([]strategy.Order, 0, len(orders))
+	for _, o := range orders {
+		if o.Symbol == "" || o.Qty <= 0 {
+			e.diagnostics.trackRejection(fmt.Sprintf("invalid order: symbol=%q qty=%.2f", o.Symbol, o.Qty))
+			continue
+		}
+		valid = append(valid, o)
+	}
+	return valid
+}
+
 // fillOrders simulates fills for a set of orders using per-symbol prices.
 // Each order fills at the price from symbolPrices for its symbol; orders
 // for symbols not in the map are skipped.
 func (e *Engine) fillOrders(orders []strategy.Order, symbolPrices map[string]float64, fillTime time.Time) []Trade {
+	orders = e.validateOrders(orders)
 	var trades []Trade
 	for _, order := range orders {
 		fillPrice, ok := symbolPrices[order.Symbol]
@@ -458,6 +507,10 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 				if len(closeOrders) > 0 {
 					trades = append(trades, e.fillOrders(closeOrders, prevDay.closes, tick.Timestamp)...)
 				}
+				// Auto-flatten remaining positions if configured.
+				if e.flattenAtClose {
+					trades = append(trades, e.flattenAll(prevDay.closes, tick.Timestamp)...)
+				}
 				recordEquity(e.portfolio.Equity(), &equityCurve, &peakEquity, &maxDrawdown)
 				dayIndex++
 			}
@@ -478,6 +531,14 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		} else if !hasDailyHooks {
 			// Reset daily P&L at day boundaries even without daily hooks.
 			if date != currentDate {
+				if currentDate != "" && e.flattenAtClose {
+					// Flatten at end of previous day.
+					closePrices := make(map[string]float64)
+					for _, pos := range e.portfolio.Positions() {
+						closePrices[pos.Symbol] = e.portfolio.LastPrice(pos.Symbol)
+					}
+					trades = append(trades, e.flattenAll(closePrices, tick.Timestamp)...)
+				}
 				currentDate = date
 				e.portfolio.ResetDaily()
 			}
@@ -486,6 +547,7 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		}
 
 		// --- Ask the strategy what to do ---
+		e.portfolio.IncrementHoldingBars(tick.Symbol)
 		e.strategy.SetPortfolio(e.portfolio)
 		orders := e.strategy.OnBar(baseTimeframe, tick)
 		if len(orders) > 0 {
