@@ -94,6 +94,14 @@ func (p *SimulatedPortfolio) isFutures(symbol string) bool {
 	return p.multiplier(symbol) > 1.0
 }
 
+// SetRealizedPL seeds the accumulated realized P&L. Used on recovery to carry
+// forward P&L from prior engine runs so the display stays accurate across restarts.
+func (p *SimulatedPortfolio) SetRealizedPL(pl float64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.realizedPL = pl
+}
+
 func (p *SimulatedPortfolio) Cash() float64 {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -316,6 +324,13 @@ func (p *SimulatedPortfolio) ApplyFill(fill strategy.Fill) {
 			// Sell exceeded long qty — flipped to short. Reset avg cost.
 			pos.AvgCost = fill.Price
 			p.holdingBars[fill.Symbol] = 0
+		} else if pos.Qty < 0 && !wasLong {
+			// Adding to an existing short position — average the cost basis.
+			// pos.Qty has already been decremented, so the previous short qty
+			// was -(pos.Qty + fill.Qty) and the new total is -pos.Qty.
+			prevShortQty := -(pos.Qty + fill.Qty)
+			totalCost := prevShortQty*pos.AvgCost + fill.Qty*fill.Price
+			pos.AvgCost = totalCost / (-pos.Qty)
 		}
 	}
 }

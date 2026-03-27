@@ -108,6 +108,12 @@ type Config struct {
 	// recovery. Use together with Positions for fully backend-controlled recovery.
 	CashOverride float64
 
+	// RealizedPL seeds the portfolio's accumulated realized P&L on recovery.
+	// When an engine restarts, the P&L counter would otherwise reset to 0.
+	// The backend computes this from persisted fills so the live P&L display
+	// stays accurate across restarts.
+	RealizedPL float64
+
 	// MaxContracts caps the qty on any single order (0 = no limit).
 	MaxContracts int
 

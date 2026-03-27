@@ -146,6 +146,12 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 	e.portfolio = portfolio.NewSimulatedPortfolio(cash)
 	seedPositions(e.portfolio, positions)
 
+	// Carry forward accumulated realized P&L from prior engine runs so the
+	// live P&L display stays accurate across restarts.
+	if e.config.RealizedPL != 0 {
+		e.portfolio.SetRealizedPL(e.config.RealizedPL)
+	}
+
 	// If the strategy supports position injection, tell it what we currently hold.
 	// Pass raw qty (negative for shorts) so the strategy can track direction.
 	if seeder, ok := e.strategy.(strategy.PositionSeeder); ok {
