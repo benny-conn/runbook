@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/benny-conn/brandon-bot/internal/bracket"
@@ -26,13 +25,13 @@ type PositionSeeder interface {
 //  3. If the strategy implements PositionSeeder, injects known positions so it
 //     knows whether it's currently holding something and at what cost
 func (e *Engine) recover(ctx context.Context, symbols []string) error {
-	log.Println("recovery: fetching account state...")
+	e.logf("recovery: fetching account state...")
 
 	// Determine cash: use override if set, otherwise query broker.
 	var cash float64
 	if e.config.CashOverride > 0 {
 		cash = e.config.CashOverride
-		log.Printf("recovery: using cash override $%.2f", cash)
+		e.logf("recovery: using cash override $%.2f", cash)
 	} else {
 		account, err := e.exec.GetAccount(ctx)
 		if err != nil {
@@ -46,7 +45,7 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 	var positions []provider.Position
 	if e.config.Positions != nil {
 		positions = e.config.Positions
-		log.Printf("recovery: using %d backend-supplied positions (bypassing broker)", len(positions))
+		e.logf("recovery: using %d backend-supplied positions (bypassing broker)", len(positions))
 	} else {
 		var err error
 		positions, err = e.exec.GetPositions(ctx)
@@ -61,7 +60,7 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 	// Apply any existing open positions.
 	seedPositions(e.portfolio, positions)
 
-	log.Printf("recovery: portfolio seeded — cash=$%.2f equity=$%.2f open_positions=%d",
+	e.logf("recovery: portfolio seeded — cash=$%.2f equity=$%.2f open_positions=%d",
 		e.portfolio.Cash(), e.portfolio.Equity(), len(positions))
 
 	// Fetch enough recent bars to warm up the strategy's rolling indicators.
@@ -83,17 +82,17 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 		if fromStart.Before(start) {
 			start = fromStart
 		}
-		log.Printf("recovery: using WarmupFrom=%s (capped at %d bars)", e.config.WarmupFrom.Format("2006-01-02"), maxBars)
+		e.logf("recovery: using WarmupFrom=%s (capped at %d bars)", e.config.WarmupFrom.Format("2006-01-02"), maxBars)
 	}
 
-	log.Printf("recovery: fetching %s history from %s for warm-up...", e.baseTimeframe, start.Format("2006-01-02"))
+	e.logf("recovery: fetching %s history from %s for warm-up...", e.baseTimeframe, start.Format("2006-01-02"))
 
 	bars, err := e.md.FetchBarsMulti(ctx, symbols, e.baseTimeframe, start, end)
 	if err != nil {
-		log.Printf("recovery: warm-up bar fetch failed (non-fatal, skipping replay): %v", err)
+		e.logf("recovery: warm-up bar fetch failed (non-fatal, skipping replay): %v", err)
 	} else {
 		e.warmingUp = true
-		log.Printf("recovery: replaying %d bars through strategy (simulating fills locally)...", len(bars))
+		e.logf("recovery: replaying %d bars through strategy (simulating fills locally)...", len(bars))
 
 		// Check if the strategy supports daily session hooks.
 		dsh, hasDailyHooks := e.strategy.(strategy.DailySessionHandler)
@@ -159,7 +158,7 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 	if seeder, ok := e.strategy.(PositionSeeder); ok {
 		for _, pos := range positions {
 			seeder.SeedPosition(pos.Symbol, pos.Qty, pos.AvgEntryPrice)
-			log.Printf("recovery: injected position into strategy — %s qty=%.2f avgCost=%.2f",
+			e.logf("recovery: injected position into strategy — %s qty=%.2f avgCost=%.2f",
 				pos.Symbol, pos.Qty, pos.AvgEntryPrice)
 		}
 	}
@@ -184,10 +183,10 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 			})
 		}
 		lh.OnLive(strategy.LiveContext{Positions: livePositions})
-		log.Println("recovery: onLive called")
+		e.logf("recovery: onLive called")
 	}
 
-	log.Println("recovery: complete — ready to trade")
+	e.logf("recovery: complete — ready to trade")
 	return nil
 }
 

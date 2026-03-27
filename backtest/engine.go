@@ -52,6 +52,7 @@ type Results struct {
 	WinningTrades  int
 	LosingTrades   int
 	Trades         []Trade
+	EquityCurve    []float64 // per-tick equity values
 	Diagnostics    Diagnostics
 }
 
@@ -81,6 +82,18 @@ func (r *Results) Print() {
 	}
 }
 
+// Progress reports backtest run state, delivered via the OnProgress callback.
+type Progress struct {
+	BarsProcessed int
+	TotalBars     int
+	Elapsed       time.Duration
+	Cash          float64
+	Equity        float64
+	TotalPL       float64
+	OpenPositions int
+	TradeCount    int
+}
+
 // EngineOption configures optional backtest engine behavior.
 type EngineOption func(*Engine)
 
@@ -102,16 +115,37 @@ func WithFlattenAtClose() EngineOption {
 	}
 }
 
+// WithLogger sets a custom logger for backtest engine output.
+// If not set, the standard library log package is used.
+func WithLogger(l engine.Logger) EngineOption {
+	return func(e *Engine) {
+		e.logger = l
+	}
+}
+
+// WithOnProgress sets a callback invoked every n bars during the backtest.
+// Provides consumers with visibility into long-running backtests.
+// Set n to 0 to fire on every bar (not recommended for large datasets).
+func WithOnProgress(n int, fn func(Progress)) EngineOption {
+	return func(e *Engine) {
+		e.progressInterval = n
+		e.onProgress = fn
+	}
+}
+
 // Engine runs a strategy against a sorted slice of historical ticks.
 type Engine struct {
-	strategy       strategy.Strategy
-	portfolio      *portfolio.SimulatedPortfolio
-	diagnostics    Diagnostics
-	multipliers    map[string]float64  // per-symbol point value (nil = all equities)
-	brackets       []bracket.Pending   // active TP/SL brackets
-	flattenAtClose bool
-	barBuffer    *barbuf.Buffer
-	dailyTracker *barbuf.DailyTracker
+	strategy         strategy.Strategy
+	portfolio        *portfolio.SimulatedPortfolio
+	diagnostics      Diagnostics
+	multipliers      map[string]float64 // per-symbol point value (nil = all equities)
+	brackets         []bracket.Pending  // active TP/SL brackets
+	flattenAtClose   bool
+	barBuffer        *barbuf.Buffer
+	dailyTracker     *barbuf.DailyTracker
+	logger           engine.Logger
+	onProgress       func(Progress)
+	progressInterval int // fire onProgress every N bars (0 = every bar)
 }
 
 func NewEngine(strat strategy.Strategy, initialCapital float64, opts ...EngineOption) *Engine {
@@ -124,7 +158,15 @@ func NewEngine(strat strategy.Strategy, initialCapital float64, opts ...EngineOp
 	for _, opt := range opts {
 		opt(e)
 	}
+	if e.logger == nil {
+		e.logger = engine.DefaultLogger()
+	}
 	return e
+}
+
+// logf logs a formatted message through the configured logger.
+func (e *Engine) logf(format string, v ...any) {
+	e.logger.Printf(format, v...)
 }
 
 // tickSizeForSymbol returns the minimum tick size for common futures symbols.
@@ -433,8 +475,16 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 	if init, ok := e.strategy.(strategy.Initializer); ok {
 		if err := init.OnInit(strategy.InitContext{}); err != nil {
 			// Log but don't fail — backtest should still run.
-			fmt.Printf("warning: strategy OnInit error: %v\n", err)
+			e.logf("warning: strategy OnInit error: %v", err)
 		}
+	}
+
+	// Progress tracking.
+	startedAt := time.Now()
+	totalBars := len(ticks)
+	progressInterval := e.progressInterval
+	if progressInterval <= 0 {
+		progressInterval = 1
 	}
 
 	// Check if the strategy supports daily session hooks.
@@ -577,6 +627,20 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 			}
 			completedBars = completedBars[:0]
 		}
+
+		// Fire progress callback at the configured interval.
+		if e.onProgress != nil && (i+1)%progressInterval == 0 {
+			e.onProgress(Progress{
+				BarsProcessed: i + 1,
+				TotalBars:     totalBars,
+				Elapsed:       time.Since(startedAt),
+				Cash:          e.portfolio.Cash(),
+				Equity:        e.portfolio.Equity(),
+				TotalPL:       e.portfolio.TotalPL(),
+				OpenPositions: len(e.portfolio.Positions()),
+				TradeCount:    len(trades),
+			})
+		}
 	}
 
 	// Fire final market close if the strategy uses daily hooks.
@@ -619,6 +683,7 @@ func (e *Engine) Run(ticks []strategy.Tick) *Results {
 		WinningTrades:  wins,
 		LosingTrades:   losses,
 		Trades:         trades,
+		EquityCurve:    equityCurve,
 		Diagnostics:    e.diagnostics,
 	}
 }

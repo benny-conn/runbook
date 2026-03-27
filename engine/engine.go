@@ -23,6 +23,49 @@ type Store interface {
 	LogSnapshot(cash, equity, totalPL float64) error
 }
 
+// Logger is an optional interface consumers can implement to redirect engine
+// log output. When nil in Config, the standard library log package is used.
+type Logger interface {
+	Printf(format string, v ...any)
+}
+
+// defaultLogger wraps the standard log package.
+type defaultLogger struct{}
+
+func (defaultLogger) Printf(format string, v ...any) { log.Printf(format, v...) }
+
+// DefaultLogger returns a Logger that writes to the standard library log package.
+func DefaultLogger() Logger { return defaultLogger{} }
+
+// Snapshot is a point-in-time view of engine state. Returned by Engine.Snapshot()
+// and passed to Config.OnStatus callbacks.
+type Snapshot struct {
+	Uptime         time.Duration
+	BarsReceived   int64
+	TradesReceived int64
+	QuotesReceived int64
+	FillsReceived  int64
+	OrdersPlaced   int64
+	OrdersErrored  int64
+	Portfolio      PortfolioSnapshot
+	Symbols        map[string]SymbolStatus
+	RuntimeErrors  []string
+}
+
+// PortfolioSnapshot captures portfolio state at a point in time.
+type PortfolioSnapshot struct {
+	Cash      float64
+	Equity    float64
+	TotalPL   float64
+	DailyPL   float64
+	Positions []strategy.Position
+}
+
+// SymbolStatus tracks per-symbol data freshness.
+type SymbolStatus struct {
+	LastBarTime time.Time
+}
+
 // MarketSchedule defines when the market opens and closes for clock-based
 // session events. Used as a fallback when the provider doesn't implement
 // SessionNotifier.
@@ -70,6 +113,21 @@ type Config struct {
 	// FlattenAtClose auto-flattens all positions at market close if the strategy
 	// doesn't fully close them itself.
 	FlattenAtClose bool
+
+	// Logger, when set, receives all engine log output. If nil, the standard
+	// library log package is used. Consumers can implement this to redirect
+	// logs to slog, zap, a file, or any other destination.
+	Logger Logger
+
+	// StatusInterval controls how often the engine logs periodic status updates.
+	// Default (zero value) is 60 seconds. Set to a negative duration to disable
+	// status logging entirely.
+	StatusInterval time.Duration
+
+	// OnStatus, when set, is called on each status tick with a structured
+	// snapshot of the engine's state. Use this to build dashboards, forward
+	// metrics to monitoring systems, or implement custom alerting.
+	OnStatus func(Snapshot)
 }
 
 func DefaultConfig(capital float64) Config {
@@ -116,6 +174,7 @@ type Engine struct {
 	exec      provider.Execution
 	store     Store
 	config    Config
+	logger    Logger
 	eventCh   chan engineEvent
 	fillCh    chan fillEvent // separate unbuffered channel — fills are never dropped
 	ctx       context.Context // set in Run, used by submitOrders
@@ -169,6 +228,10 @@ type engineStats struct {
 // object (e.g. *alpaca.Provider) or separate implementations.
 func NewEngine(strat strategy.Strategy, md provider.MarketData, exec provider.Execution, store Store, cfg Config) *Engine {
 	_, clientStops := exec.(provider.ClientSideStops)
+	l := cfg.Logger
+	if l == nil {
+		l = defaultLogger{}
+	}
 	return &Engine{
 		strategy:        strat,
 		portfolio:       portfolio.NewSimulatedPortfolio(cfg.Capital),
@@ -176,12 +239,53 @@ func NewEngine(strat strategy.Strategy, md provider.MarketData, exec provider.Ex
 		exec:            exec,
 		store:           store,
 		config:          cfg,
+		logger:          l,
 		eventCh:         make(chan engineEvent, 512),
 		fillCh:          make(chan fillEvent, 64), // buffered but never dropped
 		clientSideStops: clientStops,
 		barBuffer:       barbuf.New(),
 		dailyTracker:    barbuf.NewDailyTracker(),
 	}
+}
+
+// logf logs a formatted message through the configured logger.
+func (e *Engine) logf(format string, v ...any) {
+	e.logger.Printf(format, v...)
+}
+
+// Snapshot returns a point-in-time view of the engine's state. Safe to call
+// from any goroutine while the engine is running.
+func (e *Engine) Snapshot() Snapshot {
+	s := &e.stats
+	snap := Snapshot{
+		Uptime:         time.Since(s.startTime),
+		BarsReceived:   s.barsReceived,
+		TradesReceived: s.tradesReceived,
+		QuotesReceived: s.quotesReceived,
+		FillsReceived:  s.fillsReceived,
+		OrdersPlaced:   s.ordersPlaced,
+		OrdersErrored:  s.ordersErrored,
+		Symbols:        make(map[string]SymbolStatus, len(s.lastBarTime)),
+	}
+
+	for sym, t := range s.lastBarTime {
+		snap.Symbols[sym] = SymbolStatus{LastBarTime: t}
+	}
+
+	positions := e.portfolio.Positions()
+	snap.Portfolio = PortfolioSnapshot{
+		Cash:      e.portfolio.Cash(),
+		Equity:    e.portfolio.Equity(),
+		TotalPL:   e.portfolio.TotalPL(),
+		DailyPL:   e.portfolio.DailyPL(),
+		Positions: positions,
+	}
+
+	if reporter, ok := e.strategy.(RuntimeErrorReporter); ok {
+		snap.RuntimeErrors = reporter.RuntimeErrors()
+	}
+
+	return snap
 }
 
 // Run starts the paper trading engine. It blocks until ctx is cancelled.
@@ -196,19 +300,19 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		search = s
 	}
 	if search != nil {
-		log.Println("paper engine: provider supports asset search")
+		e.logf("paper engine: provider supports asset search")
 	}
 
 	var discovery strategy.MarketDiscovery
 	if md, ok := e.md.(strategy.MarketDiscovery); ok {
 		discovery = md
-		log.Println("paper engine: provider supports market discovery (legacy)")
+		e.logf("paper engine: provider supports market discovery (legacy)")
 	}
 
 	// If the strategy implements SymbolResolver, let it discover/choose symbols.
 	// This runs before recovery and OnInit — it determines what we trade.
 	if resolver, ok := e.strategy.(strategy.SymbolResolver); ok {
-		log.Println("paper engine: calling ResolveSymbols...")
+		e.logf("paper engine: calling ResolveSymbols...")
 		resolved, err := resolver.ResolveSymbols(strategy.InitContext{
 			Symbols:   symbols,
 			Timeframe: e.baseTimeframe,
@@ -220,7 +324,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 			return fmt.Errorf("strategy ResolveSymbols: %w", err)
 		}
 		symbols = mergeUnique(symbols, resolved)
-		log.Printf("paper engine: resolved symbols: %v", symbols)
+		e.logf("paper engine: resolved symbols: %v", symbols)
 	}
 
 	if len(symbols) == 0 {
@@ -235,13 +339,13 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		for _, sym := range symbols {
 			spec, err := csp.GetContractSpec(ctx, sym)
 			if err != nil {
-				log.Printf("paper engine: contract spec for %s: %v (defaulting to equity)", sym, err)
+				e.logf("paper engine: contract spec for %s: %v (defaulting to equity)", sym, err)
 				continue
 			}
 			e.contractSpecs[sym] = spec
 			if spec.PointValue > 1.0 {
 				multipliers[sym] = spec.PointValue
-				log.Printf("paper engine: %s point_value=%.2f (tick_size=%.4f tick_value=%.4f)",
+				e.logf("paper engine: %s point_value=%.2f (tick_size=%.4f tick_value=%.4f)",
 					sym, spec.PointValue, spec.TickSize, spec.TickValue)
 			}
 		}
@@ -289,7 +393,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 			})
 			e.aggregators = append(e.aggregators, agg)
 		}
-		log.Printf("paper engine: multi-timeframe active | base=%s higher=%v", sorted[0], sorted[1:])
+		e.logf("paper engine: multi-timeframe active | base=%s higher=%v", sorted[0], sorted[1:])
 	}
 
 	// Seed portfolio and warm up strategy indicators from account state + recent history.
@@ -313,7 +417,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 
 	// If the strategy implements Initializer, call OnInit before any market data.
 	if init, ok := e.strategy.(strategy.Initializer); ok {
-		log.Println("paper engine: calling OnInit...")
+		e.logf("paper engine: calling OnInit...")
 		if err := init.OnInit(strategy.InitContext{
 			Symbols:    symbols,
 			Timeframe:  e.baseTimeframe,
@@ -324,15 +428,15 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		}); err != nil {
 			return fmt.Errorf("strategy OnInit: %w", err)
 		}
-		log.Println("paper engine: OnInit complete")
+		e.logf("paper engine: OnInit complete")
 	}
 
 	// If the strategy implements Shutdowner, call OnExit when the engine stops.
 	if sd, ok := e.strategy.(strategy.Shutdowner); ok {
 		defer func() {
-			log.Println("paper engine: calling OnExit...")
+			e.logf("paper engine: calling OnExit...")
 			sd.OnExit()
-			log.Println("paper engine: OnExit complete")
+			e.logf("paper engine: OnExit complete")
 		}()
 	}
 
@@ -352,7 +456,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 			case <-ctx.Done():
 			}
 		}); err != nil && ctx.Err() == nil {
-			log.Printf("paper engine: fill subscription error: %v", err)
+			e.logf("paper engine: fill subscription error: %v", err)
 		}
 	}()
 
@@ -367,10 +471,10 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 					Size:      uint32(t.Size),
 				}})
 			}); err != nil && ctx.Err() == nil {
-				log.Printf("paper engine: trade subscription error: %v", err)
+				e.logf("paper engine: trade subscription error: %v", err)
 			}
 		}()
-		log.Printf("paper engine: trade-level subscription active for %v", symbols)
+		e.logf("paper engine: trade-level subscription active for %v", symbols)
 	}
 
 	// If the strategy implements QuoteSubscriber, subscribe to bid/ask quotes.
@@ -386,10 +490,10 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 					AskSize:   q.AskSize,
 				}})
 			}); err != nil && ctx.Err() == nil {
-				log.Printf("paper engine: quote subscription error: %v", err)
+				e.logf("paper engine: quote subscription error: %v", err)
 			}
 		}()
-		log.Printf("paper engine: quote-level subscription active for %v", symbols)
+		e.logf("paper engine: quote-level subscription active for %v", symbols)
 	}
 
 	// If the strategy implements DailySessionHandler, subscribe to market
@@ -398,7 +502,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 	// events if available, falling back to clock-based scheduling.
 	if _, ok := e.strategy.(strategy.DailySessionHandler); ok {
 		if _, continuous := e.md.(provider.ContinuousMarket); continuous {
-			log.Println("paper engine: provider is a continuous market — session hooks disabled")
+			e.logf("paper engine: provider is a continuous market — session hooks disabled")
 		} else if sn, ok := e.md.(provider.SessionNotifier); ok {
 			go func() {
 				if err := sn.SubscribeSession(ctx, func(ev provider.SessionEvent) {
@@ -409,17 +513,17 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 						e.send(ctx, marketCloseEvent{})
 					}
 				}); err != nil && ctx.Err() == nil {
-					log.Printf("paper engine: session subscription error: %v", err)
+					e.logf("paper engine: session subscription error: %v", err)
 				}
 			}()
-			log.Println("paper engine: market session subscription active (provider-driven)")
+			e.logf("paper engine: market session subscription active (provider-driven)")
 		} else {
 			sched := e.config.MarketSchedule
 			if sched == nil {
 				sched = NYSESchedule()
 			}
 			go e.runSessionClock(ctx, sched)
-			log.Printf("paper engine: market session subscription active (clock-based: open=%s close=%s tz=%s)",
+			e.logf("paper engine: market session subscription active (clock-based: open=%s close=%s tz=%s)",
 				sched.Open, sched.Close, sched.Timezone)
 		}
 	}
@@ -429,11 +533,13 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		lastBarTime: make(map[string]time.Time),
 		startTime:   time.Now(),
 	}
-	go e.statusLogger(ctx)
+	if e.config.StatusInterval >= 0 {
+		go e.statusLogger(ctx)
+	}
 
 	go e.processLoop(ctx)
 
-	log.Printf("paper engine: connecting to bar stream | symbols=%v timeframe=%s", symbols, e.baseTimeframe)
+	e.logf("paper engine: connecting to bar stream | symbols=%v timeframe=%s", symbols, e.baseTimeframe)
 
 	// SubscribeBars blocks until ctx is cancelled — this is the main run loop.
 	return e.md.SubscribeBars(ctx, symbols, e.baseTimeframe, func(b provider.Bar) {
@@ -448,7 +554,7 @@ func (e *Engine) send(ctx context.Context, ev engineEvent) {
 	case e.eventCh <- ev:
 	case <-ctx.Done():
 	default:
-		log.Printf("warning: event channel full, dropping %T event", ev)
+		e.logf("warning: event channel full, dropping %T event", ev)
 	}
 }
 
@@ -538,7 +644,7 @@ func (e *Engine) onQuote(quote strategy.Quote) {
 
 func (e *Engine) onMarketOpen() {
 	dsh := e.strategy.(strategy.DailySessionHandler) // safe: only called when strategy implements it
-	log.Println("paper engine: market open — calling OnMarketOpen")
+	e.logf("paper engine: market open — calling OnMarketOpen")
 	e.portfolio.ResetDaily()
 	e.strategy.SetPortfolio(e.portfolio)
 	e.submitOrders(dsh.OnMarketOpen())
@@ -546,7 +652,7 @@ func (e *Engine) onMarketOpen() {
 
 func (e *Engine) onMarketClose() {
 	dsh := e.strategy.(strategy.DailySessionHandler) // safe: only called when strategy implements it
-	log.Println("paper engine: market close — calling OnMarketClose")
+	e.logf("paper engine: market close — calling OnMarketClose")
 	e.strategy.SetPortfolio(e.portfolio)
 	e.submitOrders(dsh.OnMarketClose())
 
@@ -568,7 +674,7 @@ func (e *Engine) flattenAll(reason string) {
 			side = "buy"
 			qty = -pos.Qty
 		}
-		log.Printf("auto-flatten: %s %s qty=%.2f reason=%q", side, pos.Symbol, qty, reason)
+		e.logf("auto-flatten: %s %s qty=%.2f reason=%q", side, pos.Symbol, qty, reason)
 		e.placeOrder(strategy.Order{
 			Symbol:    pos.Symbol,
 			Side:      side,
@@ -591,13 +697,13 @@ func (e *Engine) onFill(fill strategy.Fill) {
 	e.strategy.SetPortfolio(e.portfolio)
 	e.strategy.OnFill(fill)
 
-	log.Printf("fill: %s %s qty=%.2f @ $%.2f pl=%.4f", fill.Side, fill.Symbol, fill.Qty, fill.Price, fill.RealizedPL)
+	e.logf("fill: %s %s qty=%.2f @ $%.2f pl=%.4f", fill.Side, fill.Symbol, fill.Qty, fill.Price, fill.RealizedPL)
 
 	if err := e.store.LogFill(fill); err != nil {
-		log.Printf("db: could not log fill: %v", err)
+		e.logf("db: could not log fill: %v", err)
 	}
 	if err := e.store.LogSnapshot(e.portfolio.Cash(), e.portfolio.Equity(), e.portfolio.TotalPL()); err != nil {
-		log.Printf("db: could not log snapshot: %v", err)
+		e.logf("db: could not log snapshot: %v", err)
 	}
 }
 
@@ -606,7 +712,7 @@ func (e *Engine) onFill(fill strategy.Fill) {
 func (e *Engine) runSessionClock(ctx context.Context, sched *MarketSchedule) {
 	loc, err := time.LoadLocation(sched.Timezone)
 	if err != nil {
-		log.Printf("paper engine: invalid market timezone %q: %v — session clock disabled", sched.Timezone, err)
+		e.logf("paper engine: invalid market timezone %q: %v — session clock disabled", sched.Timezone, err)
 		return
 	}
 
@@ -635,7 +741,7 @@ func (e *Engine) runSessionClock(ctx context.Context, sched *MarketSchedule) {
 		}
 
 		delay := time.Until(nextTime)
-		log.Printf("paper engine: next session event (%T) in %s at %s",
+		e.logf("paper engine: next session event (%T) in %s at %s",
 			ev, delay.Round(time.Second), nextTime.Format("2006-01-02 15:04:05 MST"))
 
 		select {
@@ -676,10 +782,10 @@ func (e *Engine) submitOrders(orders []strategy.Order) {
 		// Intercept stop/stop_limit orders when provider needs client-side management.
 		if e.clientSideStops && (order.OrderType == "stop" || order.OrderType == "stop_limit") {
 			e.pendingStops = append(e.pendingStops, pendingStop{order: order})
-			log.Printf("stop order queued (client-side): %s %s qty=%.2f stop=$%.4f reason=%q",
+			e.logf("stop order queued (client-side): %s %s qty=%.2f stop=$%.4f reason=%q",
 				order.Side, order.Symbol, order.Qty, order.StopPrice, order.Reason)
 			if err := e.store.LogOrder(order, "client-side-pending"); err != nil {
-				log.Printf("db: could not log order: %v", err)
+				e.logf("db: could not log order: %v", err)
 			}
 			continue
 		}
@@ -693,17 +799,17 @@ func (e *Engine) validateOrders(orders []strategy.Order) []strategy.Order {
 	for _, o := range orders {
 		// Sanity: reject empty symbol or non-positive qty.
 		if o.Symbol == "" {
-			log.Printf("guard: dropping order with empty symbol")
+			e.logf("guard: dropping order with empty symbol")
 			continue
 		}
 		if o.Qty <= 0 {
-			log.Printf("guard: dropping %s %s order with qty=%.2f", o.Side, o.Symbol, o.Qty)
+			e.logf("guard: dropping %s %s order with qty=%.2f", o.Side, o.Symbol, o.Qty)
 			continue
 		}
 
 		// Cap qty if MaxContracts is configured.
 		if e.config.MaxContracts > 0 && o.Qty > float64(e.config.MaxContracts) {
-			log.Printf("guard: capping %s %s qty from %.0f to %d (MaxContracts)",
+			e.logf("guard: capping %s %s qty from %.0f to %d (MaxContracts)",
 				o.Side, o.Symbol, o.Qty, e.config.MaxContracts)
 			o.Qty = float64(e.config.MaxContracts)
 		}
@@ -737,15 +843,15 @@ func (e *Engine) placeOrder(order strategy.Order) {
 	result, err := e.exec.PlaceOrder(e.ctx, order)
 	if err != nil {
 		e.stats.ordersErrored++
-		log.Printf("order error: %v", err)
+		e.logf("order error: %v", err)
 		return
 	}
 	e.stats.ordersPlaced++
-	log.Printf("order placed: %s %s qty=%.2f reason=%q id=%s",
+	e.logf("order placed: %s %s qty=%.2f reason=%q id=%s",
 		order.Side, order.Symbol, order.Qty, order.Reason, result.ID)
 
 	if err := e.store.LogOrder(order, result.ID); err != nil {
-		log.Printf("db: could not log order: %v", err)
+		e.logf("db: could not log order: %v", err)
 	}
 }
 
@@ -786,7 +892,7 @@ func (e *Engine) checkStops(symbol string, price float64) {
 		submit.StopPrice = 0
 		submit.Reason = fmt.Sprintf("stop triggered @ $%.4f: %s", price, ps.order.Reason)
 
-		log.Printf("stop triggered: %s %s stop=$%.4f price=$%.4f",
+		e.logf("stop triggered: %s %s stop=$%.4f price=$%.4f",
 			ps.order.Side, ps.order.Symbol, ps.order.StopPrice, price)
 		e.placeOrder(submit)
 	}
@@ -802,7 +908,11 @@ type RuntimeErrorReporter interface {
 // statusLogger prints periodic status updates so operators can confirm the
 // engine is alive, receiving data, and the strategy is healthy.
 func (e *Engine) statusLogger(ctx context.Context) {
-	ticker := time.NewTicker(60 * time.Second)
+	interval := e.config.StatusInterval
+	if interval == 0 {
+		interval = 60 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	var lastBars, lastTrades, lastQuotes, lastFills, lastOrders int64
@@ -812,27 +922,31 @@ func (e *Engine) statusLogger(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			snap := e.Snapshot()
+
+			// Deliver structured snapshot to callback if configured.
+			if e.config.OnStatus != nil {
+				e.config.OnStatus(snap)
+			}
+
 			s := &e.stats
-			uptime := time.Since(s.startTime).Round(time.Second)
 
 			// Compute rates since last log.
-			newBars := s.barsReceived - lastBars
-			newTrades := s.tradesReceived - lastTrades
-			newQuotes := s.quotesReceived - lastQuotes
-			newFills := s.fillsReceived - lastFills
-			newOrders := s.ordersPlaced - lastOrders
-			lastBars = s.barsReceived
-			lastTrades = s.tradesReceived
-			lastQuotes = s.quotesReceived
-			lastFills = s.fillsReceived
-			lastOrders = s.ordersPlaced
+			newBars := snap.BarsReceived - lastBars
+			newTrades := snap.TradesReceived - lastTrades
+			newQuotes := snap.QuotesReceived - lastQuotes
+			newFills := snap.FillsReceived - lastFills
+			newOrders := snap.OrdersPlaced - lastOrders
+			lastBars = snap.BarsReceived
+			lastTrades = snap.TradesReceived
+			lastQuotes = snap.QuotesReceived
+			lastFills = snap.FillsReceived
+			lastOrders = snap.OrdersPlaced
 
 			// Per-symbol last bar age.
 			var symbolStatus []string
-			for sym, barTime := range s.lastBarTime {
-				age := time.Since(barTime).Round(time.Second)
-				// Only flag as stale if it's been a while since the bar's timestamp.
-				// During market hours, 1m bars should arrive every ~60s.
+			for sym, ss := range snap.Symbols {
+				age := time.Since(ss.LastBarTime).Round(time.Second)
 				label := fmt.Sprintf("%s=%s ago", sym, age)
 				symbolStatus = append(symbolStatus, label)
 			}
@@ -843,45 +957,39 @@ func (e *Engine) statusLogger(ctx context.Context) {
 				sinceLastBar = fmt.Sprintf(" | last_bar_wall=%s ago", time.Since(s.lastBarAt).Round(time.Second))
 			}
 
-			// Portfolio snapshot.
-			cash := e.portfolio.Cash()
-			equity := e.portfolio.Equity()
-			totalPL := e.portfolio.TotalPL()
-			positions := e.portfolio.Positions()
+			uptime := snap.Uptime.Round(time.Second)
 
-			log.Printf("status: uptime=%s bars=%d(+%d) trades=%d(+%d) quotes=%d(+%d) fills=%d(+%d) orders=%d(+%d) errors=%d%s",
-				uptime, s.barsReceived, newBars, s.tradesReceived, newTrades,
-				s.quotesReceived, newQuotes, s.fillsReceived, newFills,
-				s.ordersPlaced, newOrders, s.ordersErrored, sinceLastBar)
+			e.logf("status: uptime=%s bars=%d(+%d) trades=%d(+%d) quotes=%d(+%d) fills=%d(+%d) orders=%d(+%d) errors=%d%s",
+				uptime, snap.BarsReceived, newBars, snap.TradesReceived, newTrades,
+				snap.QuotesReceived, newQuotes, snap.FillsReceived, newFills,
+				snap.OrdersPlaced, newOrders, snap.OrdersErrored, sinceLastBar)
 
 			if len(symbolStatus) > 0 {
-				log.Printf("status: last_bar_data: %s", joinStrings(symbolStatus, ", "))
+				e.logf("status: last_bar_data: %s", joinStrings(symbolStatus, ", "))
 			}
 
-			log.Printf("status: portfolio cash=$%.2f equity=$%.2f pl=$%.2f open_positions=%d",
-				cash, equity, totalPL, len(positions))
+			p := snap.Portfolio
+			e.logf("status: portfolio cash=$%.2f equity=$%.2f pl=$%.2f open_positions=%d",
+				p.Cash, p.Equity, p.TotalPL, len(p.Positions))
 
-			for _, pos := range positions {
-				log.Printf("status:   %s qty=%.2f avg=$%.2f mkt=$%.2f upl=$%.2f",
+			for _, pos := range p.Positions {
+				e.logf("status:   %s qty=%.2f avg=$%.2f mkt=$%.2f upl=$%.2f",
 					pos.Symbol, pos.Qty, pos.AvgCost, pos.MarketValue, pos.UnrealizedPL)
 			}
 
-			// Report strategy runtime errors if available.
-			if reporter, ok := e.strategy.(RuntimeErrorReporter); ok {
-				if errs := reporter.RuntimeErrors(); len(errs) > 0 {
-					log.Printf("status: strategy has %d runtime error(s):", len(errs))
-					for _, err := range errs {
-						log.Printf("status:   %s", err)
-					}
+			if len(snap.RuntimeErrors) > 0 {
+				e.logf("status: strategy has %d runtime error(s):", len(snap.RuntimeErrors))
+				for _, err := range snap.RuntimeErrors {
+					e.logf("status:   %s", err)
 				}
 			}
 
 			// Warn if no bars received recently.
-			if s.barsReceived > 0 && newBars == 0 {
-				log.Println("status: WARNING — no new bars in the last 60s")
+			if snap.BarsReceived > 0 && newBars == 0 {
+				e.logf("status: WARNING — no new bars in the last 60s")
 			}
-			if s.barsReceived == 0 && uptime > 2*time.Minute {
-				log.Println("status: WARNING — no bars received since startup")
+			if snap.BarsReceived == 0 && uptime > 2*time.Minute {
+				e.logf("status: WARNING — no bars received since startup")
 			}
 		}
 	}
@@ -902,14 +1010,14 @@ func joinStrings(ss []string, sep string) string {
 // launches independent subscription goroutines that feed events into the
 // existing event channel — no provider interface changes needed.
 func (e *Engine) addSymbols(symbols ...string) {
-	log.Printf("paper engine: dynamically adding symbols %v", symbols)
+	e.logf("paper engine: dynamically adding symbols %v", symbols)
 
 	// Subscribe to bars for new symbols.
 	go func() {
 		if err := e.md.SubscribeBars(e.ctx, symbols, e.baseTimeframe, func(b provider.Bar) {
 			e.send(e.ctx, tickEvent{tick: provider.BarToTick(b)})
 		}); err != nil && e.ctx.Err() == nil {
-			log.Printf("paper engine: dynamic bar subscription error for %v: %v", symbols, err)
+			e.logf("paper engine: dynamic bar subscription error for %v: %v", symbols, err)
 		}
 	}()
 
@@ -924,7 +1032,7 @@ func (e *Engine) addSymbols(symbols ...string) {
 					Size:      uint32(t.Size),
 				}})
 			}); err != nil && e.ctx.Err() == nil {
-				log.Printf("paper engine: dynamic trade subscription error for %v: %v", symbols, err)
+				e.logf("paper engine: dynamic trade subscription error for %v: %v", symbols, err)
 			}
 		}()
 	}
@@ -942,7 +1050,7 @@ func (e *Engine) addSymbols(symbols ...string) {
 					AskSize:   q.AskSize,
 				}})
 			}); err != nil && e.ctx.Err() == nil {
-				log.Printf("paper engine: dynamic quote subscription error for %v: %v", symbols, err)
+				e.logf("paper engine: dynamic quote subscription error for %v: %v", symbols, err)
 			}
 		}()
 	}
