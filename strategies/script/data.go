@@ -25,10 +25,11 @@ const (
 type Option func(*scriptOptions)
 
 type scriptOptions struct {
-	marketData provider.MarketData
-	capital    float64
-	hasCapital bool
-	logSink   *LogSink
+	marketData      provider.MarketData
+	capital         float64
+	hasCapital      bool
+	logSink         *LogSink
+	callbackTimeout time.Duration // max time a hot-path JS callback can run (0 = 5s default)
 }
 
 // LogSink captures console.log output from JS scripts.
@@ -74,6 +75,17 @@ func WithCapital(c float64) Option {
 	return func(o *scriptOptions) {
 		o.capital = c
 		o.hasCapital = true
+	}
+}
+
+// WithCallbackTimeout sets the maximum duration a hot-path JS callback (onBar,
+// onTrade, onFill, onMarketOpen, onMarketClose) can run before being interrupted.
+// Default is 5 seconds. This protects against infinite loops in scripts hanging
+// the engine. Init-time callbacks (onInit, resolveSymbols, onExit) are not subject
+// to this timeout.
+func WithCallbackTimeout(d time.Duration) Option {
+	return func(o *scriptOptions) {
+		o.callbackTimeout = d
 	}
 }
 

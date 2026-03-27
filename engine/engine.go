@@ -8,6 +8,7 @@ import (
 
 	"github.com/benny-conn/brandon-bot/internal/barbuf"
 	"github.com/benny-conn/brandon-bot/internal/bracket"
+	"github.com/benny-conn/brandon-bot/internal/orderutil"
 	"github.com/benny-conn/brandon-bot/internal/portfolio"
 	"github.com/benny-conn/brandon-bot/provider"
 	"github.com/benny-conn/brandon-bot/strategy"
@@ -281,7 +282,7 @@ func (e *Engine) Snapshot() Snapshot {
 		Positions: positions,
 	}
 
-	if reporter, ok := e.strategy.(RuntimeErrorReporter); ok {
+	if reporter, ok := e.strategy.(strategy.RuntimeErrorReporter); ok {
 		snap.RuntimeErrors = reporter.RuntimeErrors()
 	}
 
@@ -664,24 +665,9 @@ func (e *Engine) onMarketClose() {
 
 // flattenAll closes all open positions with market orders.
 func (e *Engine) flattenAll(reason string) {
-	for _, pos := range e.portfolio.Positions() {
-		if pos.Qty == 0 {
-			continue
-		}
-		side := "sell"
-		qty := pos.Qty
-		if pos.Qty < 0 {
-			side = "buy"
-			qty = -pos.Qty
-		}
-		e.logf("auto-flatten: %s %s qty=%.2f reason=%q", side, pos.Symbol, qty, reason)
-		e.placeOrder(strategy.Order{
-			Symbol:    pos.Symbol,
-			Side:      side,
-			Qty:       qty,
-			OrderType: "market",
-			Reason:    reason,
-		})
+	for _, o := range orderutil.BuildFlattenOrders(e.portfolio.Positions(), reason) {
+		e.logf("auto-flatten: %s %s qty=%.2f reason=%q", o.Side, o.Symbol, o.Qty, reason)
+		e.placeOrder(o)
 	}
 }
 
@@ -795,28 +781,9 @@ func (e *Engine) submitOrders(orders []strategy.Order) {
 
 // validateOrders applies engine-level guards, dropping invalid or duplicate orders.
 func (e *Engine) validateOrders(orders []strategy.Order) []strategy.Order {
-	valid := make([]strategy.Order, 0, len(orders))
-	for _, o := range orders {
-		// Sanity: reject empty symbol or non-positive qty.
-		if o.Symbol == "" {
-			e.logf("guard: dropping order with empty symbol")
-			continue
-		}
-		if o.Qty <= 0 {
-			e.logf("guard: dropping %s %s order with qty=%.2f", o.Side, o.Symbol, o.Qty)
-			continue
-		}
-
-		// Cap qty if MaxContracts is configured.
-		if e.config.MaxContracts > 0 && o.Qty > float64(e.config.MaxContracts) {
-			e.logf("guard: capping %s %s qty from %.0f to %d (MaxContracts)",
-				o.Side, o.Symbol, o.Qty, e.config.MaxContracts)
-			o.Qty = float64(e.config.MaxContracts)
-		}
-
-		valid = append(valid, o)
-	}
-	return valid
+	return orderutil.ValidateOrders(orders, e.config.MaxContracts, func(reason string) {
+		e.logf("guard: %s", reason)
+	})
 }
 
 // checkWarmupBrackets simulates TP/SL bracket fills during warmup.
@@ -897,12 +864,6 @@ func (e *Engine) checkStops(symbol string, price float64) {
 		e.placeOrder(submit)
 	}
 	e.pendingStops = remaining
-}
-
-// RuntimeErrorReporter is an optional interface a strategy can implement to
-// expose runtime errors for status logging. ScriptStrategy implements this.
-type RuntimeErrorReporter interface {
-	RuntimeErrors() []string
 }
 
 // statusLogger prints periodic status updates so operators can confirm the

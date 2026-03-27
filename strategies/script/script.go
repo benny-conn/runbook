@@ -32,23 +32,24 @@ const maxRuntimeErrors = 10
 
 // ScriptStrategy implements strategy.Strategy via a Goja JS runtime.
 type ScriptStrategy struct {
-	mu             sync.Mutex
-	vm             *goja.Runtime
-	onBarFn        goja.Callable
-	onFill         goja.Callable
-	onTrade        goja.Callable
-	onInit         goja.Callable
-	onMarketOpen   goja.Callable
-	onMarketClose  goja.Callable
-	onLive         goja.Callable
-	onExit         goja.Callable
-	resolveSymbols goja.Callable
-	timeframesFn   goja.Callable
-	name           string
-	runtimeErrors  []string
-	errorSeen      map[string]bool
-	dataGlobal     *dataGlobal // nil if no MarketData provider
-	contractSpecs  map[string]strategy.ContractSpec
+	mu              sync.Mutex
+	vm              *goja.Runtime
+	onBarFn         goja.Callable
+	onFill          goja.Callable
+	onTrade         goja.Callable
+	onInit          goja.Callable
+	onMarketOpen    goja.Callable
+	onMarketClose   goja.Callable
+	onLive          goja.Callable
+	onExit          goja.Callable
+	resolveSymbols  goja.Callable
+	timeframesFn    goja.Callable
+	name            string
+	runtimeErrors   []string
+	errorSeen       map[string]bool
+	dataGlobal      *dataGlobal // nil if no MarketData provider
+	contractSpecs   map[string]strategy.ContractSpec
+	callbackTimeout time.Duration // max time for hot-path callbacks (0 = 5s default)
 }
 
 // SetPortfolio implements strategy.Strategy. Updates the "portfolio" JS global
@@ -220,22 +221,55 @@ func New(name, src string, config map[string]string, opts ...Option) (*ScriptStr
 		return fn
 	}
 
+	timeout := options.callbackTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
 	return &ScriptStrategy{
-		vm:             vm,
-		onBarFn:        onBarFn,
-		onFill:         extractOptional("onFill"),
-		onTrade:        extractOptional("onTrade"),
-		onInit:         extractOptional("onInit"),
-		onMarketOpen:   extractOptional("onMarketOpen"),
-		onMarketClose:  extractOptional("onMarketClose"),
-		onLive:         extractOptional("onLive"),
-		onExit:         extractOptional("onExit"),
-		resolveSymbols: extractOptional("resolveSymbols"),
-		timeframesFn:   extractOptional("timeframes"),
-		name:           name,
-		errorSeen:      make(map[string]bool),
-		dataGlobal:     dg,
+		vm:              vm,
+		onBarFn:         onBarFn,
+		onFill:          extractOptional("onFill"),
+		onTrade:         extractOptional("onTrade"),
+		onInit:          extractOptional("onInit"),
+		onMarketOpen:    extractOptional("onMarketOpen"),
+		onMarketClose:   extractOptional("onMarketClose"),
+		onLive:          extractOptional("onLive"),
+		onExit:          extractOptional("onExit"),
+		resolveSymbols:  extractOptional("resolveSymbols"),
+		timeframesFn:    extractOptional("timeframes"),
+		name:            name,
+		errorSeen:       make(map[string]bool),
+		dataGlobal:      dg,
+		callbackTimeout: timeout,
 	}, nil
+}
+
+// safeCall invokes a JS callable with panic recovery. If withTimeout is true,
+// the call is also subject to the configured callbackTimeout — if the script
+// doesn't return in time, the VM is interrupted and an error is returned.
+// Caller must hold s.mu.
+func (s *ScriptStrategy) safeCall(fn goja.Callable, withTimeout bool, args ...goja.Value) (result goja.Value, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			msg := fmt.Sprintf("script panic: %v", r)
+			s.trackError(msg)
+			err = fmt.Errorf("%s", msg)
+			result = goja.Undefined()
+		}
+	}()
+
+	if withTimeout {
+		timer := time.AfterFunc(s.callbackTimeout, func() {
+			s.vm.Interrupt("script timeout: callback exceeded " + s.callbackTimeout.String())
+		})
+		defer func() {
+			timer.Stop()
+			s.vm.ClearInterrupt()
+		}()
+	}
+
+	return fn(goja.Undefined(), args...)
 }
 
 // Name implements strategy.Strategy.
@@ -273,7 +307,7 @@ func (s *ScriptStrategy) Timeframes() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	result, err := s.timeframesFn(goja.Undefined())
+	result, err := s.safeCall(s.timeframesFn, false)
 	if err != nil {
 		msg := fmt.Sprintf("script timeframes() error: %v", err)
 		fmt.Println(msg)
@@ -318,7 +352,7 @@ func (s *ScriptStrategy) OnBar(timeframe string, tick strategy.Tick) []strategy.
 	})
 
 
-	result, err := s.onBarFn(goja.Undefined(), s.vm.ToValue(timeframe), tickVal)
+	result, err := s.safeCall(s.onBarFn, true, s.vm.ToValue(timeframe), tickVal)
 	if err != nil {
 		msg := fmt.Sprintf("script onBar error: %v", err)
 		fmt.Println(msg)
@@ -345,7 +379,7 @@ func (s *ScriptStrategy) OnFill(fill strategy.Fill) {
 		"price":     fill.Price,
 		"timestamp": fill.Timestamp.UnixMilli(),
 	})
-	if _, err := s.onFill(goja.Undefined(), fillVal); err != nil {
+	if _, err := s.safeCall(s.onFill, true, fillVal); err != nil {
 		msg := fmt.Sprintf("script onFill error: %v", err)
 		fmt.Println(msg)
 		s.trackError(msg)
@@ -372,7 +406,7 @@ func (s *ScriptStrategy) OnTrade(trade strategy.Trade) []strategy.Order {
 		"size":      trade.Size,
 	})
 
-	result, err := s.onTrade(goja.Undefined(), tradeVal)
+	result, err := s.safeCall(s.onTrade, true, tradeVal)
 	if err != nil {
 		msg := fmt.Sprintf("script onTrade error: %v", err)
 		fmt.Println(msg)
@@ -429,7 +463,7 @@ func (s *ScriptStrategy) ResolveSymbols(ctx strategy.InitContext) ([]string, err
 		})
 	}
 
-	result, err := s.resolveSymbols(goja.Undefined(), arg)
+	result, err := s.safeCall(s.resolveSymbols, false, arg)
 	if err != nil {
 		return nil, fmt.Errorf("script resolveSymbols error: %w", err)
 	}
@@ -507,7 +541,7 @@ func (s *ScriptStrategy) OnInit(ctx strategy.InitContext) error {
 		"config":    ctx.Config,
 	})
 
-	if _, err := s.onInit(goja.Undefined(), ctxVal); err != nil {
+	if _, err := s.safeCall(s.onInit, false, ctxVal); err != nil {
 		return fmt.Errorf("script onInit error: %w", err)
 	}
 	return nil
@@ -526,7 +560,7 @@ func (s *ScriptStrategy) OnMarketOpen() []strategy.Order {
 	defer s.mu.Unlock()
 
 
-	result, err := s.onMarketOpen(goja.Undefined())
+	result, err := s.safeCall(s.onMarketOpen, true)
 	if err != nil {
 		msg := fmt.Sprintf("script onMarketOpen error: %v", err)
 		fmt.Println(msg)
@@ -545,8 +579,7 @@ func (s *ScriptStrategy) OnMarketClose() []strategy.Order {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-
-	result, err := s.onMarketClose(goja.Undefined())
+	result, err := s.safeCall(s.onMarketClose, true)
 	if err != nil {
 		msg := fmt.Sprintf("script onMarketClose error: %v", err)
 		fmt.Println(msg)
@@ -569,7 +602,7 @@ func (s *ScriptStrategy) OnExit() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, err := s.onExit(goja.Undefined()); err != nil {
+	if _, err := s.safeCall(s.onExit, false); err != nil {
 		fmt.Printf("script onExit error: %v\n", err)
 	}
 }
@@ -600,7 +633,7 @@ func (s *ScriptStrategy) OnLive(ctx strategy.LiveContext) {
 	arg := s.vm.NewObject()
 	arg.Set("positions", positions)
 
-	if _, err := s.onLive(goja.Undefined(), arg); err != nil {
+	if _, err := s.safeCall(s.onLive, false, arg); err != nil {
 		fmt.Printf("script onLive error: %v\n", err)
 	}
 }
@@ -739,10 +772,22 @@ func (s *ScriptStrategy) makePortfolioObj(p strategy.Portfolio) goja.Value {
 }
 
 // parseOrders converts a JS return value into []strategy.Order.
+// Accepts an array of order objects or a single order object (auto-wrapped).
 func (s *ScriptStrategy) parseOrders(val goja.Value) []strategy.Order {
+	if val == nil || goja.IsUndefined(val) || goja.IsNull(val) {
+		return nil
+	}
+
 	exported := val.Export()
-	arr, ok := exported.([]interface{})
-	if !ok {
+
+	// Auto-wrap a single order object into a slice.
+	var arr []interface{}
+	switch v := exported.(type) {
+	case []interface{}:
+		arr = v
+	case map[string]interface{}:
+		arr = []interface{}{v}
+	default:
 		return nil
 	}
 
@@ -785,6 +830,16 @@ func (s *ScriptStrategy) parseOrders(val goja.Value) []strategy.Order {
 		if v, ok := m["reason"].(string); ok {
 			o.Reason = v
 		}
+
+		// Warn about orders missing required fields so script authors
+		// get feedback instead of silent drops.
+		if o.Symbol == "" {
+			s.trackError("script returned order with empty symbol — order will be dropped by engine")
+		}
+		if o.Qty <= 0 {
+			s.trackError(fmt.Sprintf("script returned order with qty=%.2f — order will be dropped by engine", o.Qty))
+		}
+
 		orders = append(orders, o)
 	}
 

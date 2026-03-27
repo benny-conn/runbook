@@ -11,13 +11,6 @@ import (
 	"github.com/benny-conn/brandon-bot/strategy"
 )
 
-// PositionSeeder is an optional interface a strategy can implement to accept
-// position state injected during warm-up recovery. If a strategy doesn't
-// implement this, position reconciliation is skipped (indicator warm-up still runs).
-type PositionSeeder interface {
-	SeedPosition(symbol string, qty, avgCost float64)
-}
-
 // recover runs on startup before the live stream begins:
 //  1. Queries the broker for real account cash + open positions → seeds portfolio
 //  2. Fetches recent historical bars → replays through strategy (no orders placed)
@@ -155,7 +148,7 @@ func (e *Engine) recover(ctx context.Context, symbols []string) error {
 
 	// If the strategy supports position injection, tell it what we currently hold.
 	// Pass raw qty (negative for shorts) so the strategy can track direction.
-	if seeder, ok := e.strategy.(PositionSeeder); ok {
+	if seeder, ok := e.strategy.(strategy.PositionSeeder); ok {
 		for _, pos := range positions {
 			seeder.SeedPosition(pos.Symbol, pos.Qty, pos.AvgEntryPrice)
 			e.logf("recovery: injected position into strategy — %s qty=%.2f avgCost=%.2f",

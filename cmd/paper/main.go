@@ -72,14 +72,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("unknown strategy %q: %v", *stratName, err)
 	}
-	if len(runCfg.Strategy) > 0 {
-		if c, ok := strat.(strategy.Configurable); ok {
-			if err := c.Configure(runCfg.Strategy); err != nil {
-				log.Fatalf("configuring strategy: %v", err)
-			}
-		}
-	}
-
 	store, err := db.Open()
 	if err != nil {
 		log.Fatalf("opening database: %v", err)

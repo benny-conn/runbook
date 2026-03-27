@@ -64,14 +64,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("unknown strategy %q: %v", *stratName, err)
 	}
-	if len(strategyCfg) > 0 {
-		if c, ok := strat.(strategy.Configurable); ok {
-			if err := c.Configure(strategyCfg); err != nil {
-				log.Fatalf("configuring strategy: %v", err)
-			}
-		}
-	}
-
 	// Get timeframe from the strategy (single source of truth).
 	timeframes := strat.Timeframes()
 	if len(timeframes) == 0 {

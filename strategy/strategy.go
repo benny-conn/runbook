@@ -80,16 +80,6 @@ type Trade struct {
 	Conditions []string
 }
 
-// Configurable is an optional interface a strategy can implement to accept
-// a JSON config file passed via --config on the CLI. Configure is called once
-// after the strategy is constructed and before the first OnBar, so it can
-// override any defaults set in the constructor.
-// Partial configs are fine — only fields present in the JSON are updated;
-// missing fields keep their constructor defaults.
-type Configurable interface {
-	Configure(data []byte) error
-}
-
 // Strategy is implemented by any trading algorithm.
 //
 // Timeframes returns the bar resolutions the strategy needs (e.g. ["1m"],
@@ -191,6 +181,13 @@ type SymbolResolver interface {
 	ResolveSymbols(ctx InitContext) ([]string, error)
 }
 
+// PositionSeeder is an optional interface a strategy can implement to accept
+// position state injected during warm-up recovery. If a strategy doesn't
+// implement this, position reconciliation is skipped (indicator warm-up still runs).
+type PositionSeeder interface {
+	SeedPosition(symbol string, qty, avgCost float64)
+}
+
 // LiveContext is passed to LiveHandler.OnLive when the engine transitions
 // from warmup to live trading.
 type LiveContext struct {
@@ -203,6 +200,12 @@ type LiveContext struct {
 // P&L) and inspect the real broker state before the first live bar.
 type LiveHandler interface {
 	OnLive(ctx LiveContext)
+}
+
+// RuntimeErrorReporter is an optional interface a strategy can implement to
+// expose runtime errors for status logging. ScriptStrategy implements this.
+type RuntimeErrorReporter interface {
+	RuntimeErrors() []string
 }
 
 // BarBuffer provides access to recent bar history. Implemented by barbuf.Buffer.

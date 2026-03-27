@@ -9,6 +9,7 @@ import (
 	"github.com/benny-conn/brandon-bot/engine"
 	"github.com/benny-conn/brandon-bot/internal/barbuf"
 	"github.com/benny-conn/brandon-bot/internal/bracket"
+	"github.com/benny-conn/brandon-bot/internal/orderutil"
 	"github.com/benny-conn/brandon-bot/internal/portfolio"
 	"github.com/benny-conn/brandon-bot/strategy"
 )
@@ -230,25 +231,7 @@ func (e *Engine) checkBrackets(tick strategy.Tick) []Trade {
 
 // flattenAll closes all open positions at the given prices.
 func (e *Engine) flattenAll(prices map[string]float64, fillTime time.Time) []Trade {
-	var orders []strategy.Order
-	for _, pos := range e.portfolio.Positions() {
-		if pos.Qty == 0 {
-			continue
-		}
-		side := "sell"
-		qty := pos.Qty
-		if pos.Qty < 0 {
-			side = "buy"
-			qty = -pos.Qty
-		}
-		orders = append(orders, strategy.Order{
-			Symbol:    pos.Symbol,
-			Side:      side,
-			Qty:       qty,
-			OrderType: "market",
-			Reason:    "flatten at close",
-		})
-	}
+	orders := orderutil.BuildFlattenOrders(e.portfolio.Positions(), "flatten at close")
 	if len(orders) == 0 {
 		return nil
 	}
@@ -257,15 +240,9 @@ func (e *Engine) flattenAll(prices map[string]float64, fillTime time.Time) []Tra
 
 // validateOrders filters out invalid orders, matching the live engine's guards.
 func (e *Engine) validateOrders(orders []strategy.Order) []strategy.Order {
-	valid := make([]strategy.Order, 0, len(orders))
-	for _, o := range orders {
-		if o.Symbol == "" || o.Qty <= 0 {
-			e.diagnostics.trackRejection(fmt.Sprintf("invalid order: symbol=%q qty=%.2f", o.Symbol, o.Qty))
-			continue
-		}
-		valid = append(valid, o)
-	}
-	return valid
+	return orderutil.ValidateOrders(orders, 0, func(reason string) {
+		e.diagnostics.trackRejection(reason)
+	})
 }
 
 // fillOrders simulates fills for a set of orders using per-symbol prices.
