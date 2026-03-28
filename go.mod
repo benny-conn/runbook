@@ -13,6 +13,7 @@ require (
 	github.com/hadrianl/ibapi v0.0.0-20230925013244-4f647c0e9c16
 	github.com/massive-com/client-go/v3 v3.1.0
 	github.com/shopspring/decimal v1.4.0
+	google.golang.org/protobuf v1.35.2
 	modernc.org/sqlite v1.47.0
 )
 

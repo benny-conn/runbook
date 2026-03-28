@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/benny-conn/runbook/provider"
+	"github.com/benny-conn/runbook/providers/rithmic/rti"
 	"github.com/benny-conn/runbook/strategy"
 	"github.com/coder/websocket"
 )
@@ -183,52 +184,63 @@ func (p *Provider) getHistConn(ctx context.Context) (*conn, error) {
 
 func (p *Provider) resolveFirstAccount(ctx context.Context, c *conn) (string, error) {
 	// First get login info for fcm/ib IDs
-	resp, err := c.sendAndRecv(ctx, buildRequestLoginInfo(), tplResponseLoginInfo)
+	raw, err := c.sendAndRecvRaw(ctx, buildRequestLoginInfo(), tplResponseLoginInfo)
 	if err != nil {
 		return "", fmt.Errorf("rithmic login info: %w", err)
 	}
-	if resp.FcmID != "" {
-		p.fcmID = resp.FcmID
+	resp, err := decodeResponseLoginInfo(raw)
+	if err != nil {
+		return "", fmt.Errorf("rithmic decode login info: %w", err)
 	}
-	if resp.IbID != "" {
-		p.ibID = resp.IbID
+	if resp.GetFcmId() != "" {
+		p.fcmID = resp.GetFcmId()
+	}
+	if resp.GetIbId() != "" {
+		p.ibID = resp.GetIbId()
 	}
 
-	accounts, err := c.sendAndRecvAll(ctx, buildRequestAccountList(p.fcmID, p.ibID), tplResponseAccountList)
+	rawAccounts, err := c.sendAndRecvAllRaw(ctx, buildRequestAccountList(p.fcmID, p.ibID), tplResponseAccountList)
 	if err != nil {
 		return "", fmt.Errorf("rithmic account list: %w", err)
 	}
-	if len(accounts) == 0 {
+	if len(rawAccounts) == 0 {
 		return "", fmt.Errorf("rithmic: no accounts available")
 	}
 
-	acct := accounts[0]
+	acct, err := decodeResponseAccountList(rawAccounts[0])
+	if err != nil {
+		return "", fmt.Errorf("rithmic decode account: %w", err)
+	}
 	log.Printf("rithmic: auto-selected account %s (%s) fcm=%s ib=%s",
-		acct.AccountID, acct.AccountName, acct.FcmID, acct.IbID)
+		acct.GetAccountId(), acct.GetAccountName(), acct.GetFcmId(), acct.GetIbId())
 
-	if acct.FcmID != "" {
-		p.fcmID = acct.FcmID
+	if acct.GetFcmId() != "" {
+		p.fcmID = acct.GetFcmId()
 	}
-	if acct.IbID != "" {
-		p.ibID = acct.IbID
+	if acct.GetIbId() != "" {
+		p.ibID = acct.GetIbId()
 	}
-	return acct.AccountID, nil
+	return acct.GetAccountId(), nil
 }
 
 func (p *Provider) resolveTradeRoutes(ctx context.Context, c *conn) error {
-	routes, err := c.sendAndRecvAll(ctx, buildRequestTradeRoutes(), tplResponseTradeRoutes)
+	rawRoutes, err := c.sendAndRecvAllRaw(ctx, buildRequestTradeRoutes(), tplResponseTradeRoutes)
 	if err != nil {
 		return err
 	}
 
 	p.routesMu.Lock()
 	defer p.routesMu.Unlock()
-	for _, r := range routes {
-		if r.Exchange != "" && r.TradeRoute != "" {
-			key := r.Exchange
+	for _, raw := range rawRoutes {
+		r, err := decodeResponseTradeRoutes(raw)
+		if err != nil {
+			continue
+		}
+		if r.GetExchange() != "" && r.GetTradeRoute() != "" {
+			key := r.GetExchange()
 			// Prefer default routes
-			if _, exists := p.routes[key]; !exists || r.IsDefault {
-				p.routes[key] = r.TradeRoute
+			if _, exists := p.routes[key]; !exists || r.GetIsDefault() {
+				p.routes[key] = r.GetTradeRoute()
 			}
 		}
 	}
@@ -267,13 +279,17 @@ func (p *Provider) FetchBars(ctx context.Context, symbol, timeframe string, star
 	finishSsboe := int32(end.Unix())
 
 	req := buildRequestTickBarReplay(symbol, p.exchange(), startSsboe, finishSsboe)
-	bars, err := c.sendAndRecvAll(ctx, req, tplResponseTickBarReplay)
+	rawBars, err := c.sendAndRecvAllRaw(ctx, req, tplResponseTickBarReplay)
 	if err != nil {
 		return nil, fmt.Errorf("rithmic tick bar replay: %w", err)
 	}
 
-	result := make([]provider.Bar, 0, len(bars))
-	for _, b := range bars {
+	result := make([]provider.Bar, 0, len(rawBars))
+	for _, raw := range rawBars {
+		b, err := decodeResponseTickBarReplay(raw)
+		if err != nil {
+			continue
+		}
 		ts := time.Unix(0, 0)
 		if len(b.DataBarSsboe) > 0 {
 			secs := int64(b.DataBarSsboe[0])
@@ -287,11 +303,11 @@ func (p *Provider) FetchBars(ctx context.Context, symbol, timeframe string, star
 		result = append(result, provider.Bar{
 			Symbol:    symbol,
 			Timestamp: ts,
-			Open:      b.OpenPrice,
-			High:      b.HighPrice,
-			Low:       b.LowPrice,
-			Close:     b.ClosePrice,
-			Volume:    float64(b.BarVolume),
+			Open:      b.GetOpenPrice(),
+			High:      b.GetHighPrice(),
+			Low:       b.GetLowPrice(),
+			Close:     b.GetClosePrice(),
+			Volume:    float64(b.GetVolume()),
 		})
 	}
 
@@ -380,26 +396,28 @@ func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timefram
 			}
 
 		case data := <-ch:
-			msg, err := decodeMsg(data)
-			if err != nil {
-				continue
-			}
+			tpl := templateID(data)
 
-			switch msg.TemplateID {
+			switch tpl {
 			case tplResponseMarketData:
-				if len(msg.RpCode) > 0 && msg.RpCode[0] != "0" {
-					log.Printf("rithmic: market data subscribe error: %v", msg.UserMsg)
+				md, err := decodeResponseMarketData(data)
+				if err == nil && !rpCodeOK(md.RpCode) {
+					log.Printf("rithmic: market data subscribe error: %v", md.UserMsg)
 				}
 			case tplLastTrade:
-				if msg.PresenceBits&presenceLastTrade == 0 {
+				lt, err := decodeLastTrade(data)
+				if err != nil {
 					continue
 				}
-				sym := msg.Symbol
+				if lt.GetPresenceBits()&uint32(rti.LastTrade_LAST_TRADE) == 0 {
+					continue
+				}
+				sym := lt.GetSymbol()
 				bs, ok := barStates[sym]
 				if !ok {
 					continue
 				}
-				price := msg.TradePrice
+				price := lt.GetTradePrice()
 				if !bs.hasData {
 					bs.open = price
 					bs.high = price
@@ -413,7 +431,7 @@ func (p *Provider) SubscribeBars(ctx context.Context, symbols []string, timefram
 					bs.low = price
 				}
 				bs.close = price
-				bs.volume += float64(msg.TradeSize)
+				bs.volume += float64(lt.GetTradeSize())
 			}
 		}
 	}
@@ -448,19 +466,22 @@ func (p *Provider) SubscribeTrades(ctx context.Context, symbols []string, handle
 		case <-ctx.Done():
 			return nil
 		case data := <-ch:
-			msg, err := decodeMsg(data)
-			if err != nil || msg.TemplateID != tplLastTrade {
+			if templateID(data) != tplLastTrade {
 				continue
 			}
-			if msg.PresenceBits&presenceLastTrade == 0 {
+			lt, err := decodeLastTrade(data)
+			if err != nil {
 				continue
 			}
-			ts := rithmicTime(msg.Ssboe, msg.Usecs)
+			if lt.GetPresenceBits()&uint32(rti.LastTrade_LAST_TRADE) == 0 {
+				continue
+			}
+			ts := rithmicTime(lt.GetSsboe(), lt.GetUsecs())
 			handler(provider.Trade{
-				Symbol:    msg.Symbol,
+				Symbol:    lt.GetSymbol(),
 				Timestamp: ts,
-				Price:     msg.TradePrice,
-				Size:      float64(msg.TradeSize),
+				Price:     lt.GetTradePrice(),
+				Size:      float64(lt.GetTradeSize()),
 			})
 		}
 	}
@@ -495,30 +516,34 @@ func (p *Provider) SubscribeQuotes(ctx context.Context, symbols []string, handle
 		case <-ctx.Done():
 			return nil
 		case data := <-ch:
-			msg, err := decodeMsg(data)
-			if err != nil || msg.TemplateID != tplBestBidOffer {
+			if templateID(data) != tplBestBidOffer {
+				continue
+			}
+			bbo, err := decodeBestBidOffer(data)
+			if err != nil {
 				continue
 			}
 
+			sym := bbo.GetSymbol()
 			p.quotesMu.Lock()
-			qs, ok := p.quotes[msg.Symbol]
+			qs, ok := p.quotes[sym]
 			if !ok {
 				qs = &quoteState{}
-				p.quotes[msg.Symbol] = qs
+				p.quotes[sym] = qs
 			}
-			if msg.PresenceBits&presenceBid != 0 {
-				qs.bidPrice = msg.BidPrice
-				qs.bidSize = float64(msg.BidSize)
+			if bbo.GetPresenceBits()&uint32(rti.BestBidOffer_BID) != 0 {
+				qs.bidPrice = bbo.GetBidPrice()
+				qs.bidSize = float64(bbo.GetBidSize())
 			}
-			if msg.PresenceBits&presenceAsk != 0 {
-				qs.askPrice = msg.AskPrice
-				qs.askSize = float64(msg.AskSize)
+			if bbo.GetPresenceBits()&uint32(rti.BestBidOffer_ASK) != 0 {
+				qs.askPrice = bbo.GetAskPrice()
+				qs.askSize = float64(bbo.GetAskSize())
 			}
-			qs.ts = rithmicTime(msg.Ssboe, msg.Usecs)
+			qs.ts = rithmicTime(bbo.GetSsboe(), bbo.GetUsecs())
 			p.quotesMu.Unlock()
 
 			handler(provider.Quote{
-				Symbol:    msg.Symbol,
+				Symbol:    sym,
 				Timestamp: qs.ts,
 				BidPrice:  qs.bidPrice,
 				BidSize:   qs.bidSize,
@@ -608,16 +633,21 @@ func (p *Provider) PlaceOrder(ctx context.Context, order strategy.Order) (provid
 		qty, txnType, pt, price, triggerPrice, userTag,
 	)
 
-	resp, err := c.sendAndRecv(ctx, req, tplResponseNewOrder)
+	raw, err := c.sendAndRecvRaw(ctx, req, tplResponseNewOrder)
 	if err != nil {
 		return provider.OrderResult{}, fmt.Errorf("rithmic new order: %w", err)
 	}
 
-	if len(resp.RpCode) > 0 && resp.RpCode[0] != "0" {
+	resp, err := decodeResponseNewOrder(raw)
+	if err != nil {
+		return provider.OrderResult{}, fmt.Errorf("rithmic decode new order: %w", err)
+	}
+
+	if !rpCodeOK(resp.RpCode) {
 		return provider.OrderResult{}, fmt.Errorf("rithmic order rejected: rp_code=%v msg=%v", resp.RpCode, resp.UserMsg)
 	}
 
-	basketID := resp.BasketID
+	basketID := resp.GetBasketId()
 	log.Printf("rithmic: order placed basket_id=%s symbol=%s side=%s qty=%d type=%s",
 		basketID, order.Symbol, order.Side, qty, order.OrderType)
 
@@ -745,47 +775,52 @@ func (p *Provider) SubscribeFills(ctx context.Context, handler func(provider.Fil
 		case <-ctx.Done():
 			return nil
 		case data := <-ch:
-			msg, err := decodeMsg(data)
-			if err != nil {
-				continue
-			}
+			tpl := templateID(data)
 
-			switch msg.TemplateID {
+			switch tpl {
 			case tplResponseOrderUpdates:
-				if len(msg.RpCode) > 0 && msg.RpCode[0] != "0" {
-					log.Printf("rithmic: order updates subscribe error: %v", msg.UserMsg)
+				ou, err := decodeResponseOrderUpdates(data)
+				if err == nil && !rpCodeOK(ou.RpCode) {
+					log.Printf("rithmic: order updates subscribe error: %v", ou.UserMsg)
 				}
 			case tplExchangeOrderNotification:
-				if msg.NotifyType != exchNotifyFill {
+				eon, err := decodeExchangeOrderNotification(data)
+				if err != nil {
 					continue
 				}
-				if msg.FillSize == 0 {
+				if eon.GetNotifyType() != rti.ExchangeOrderNotification_FILL {
+					continue
+				}
+				if eon.GetFillSize() == 0 {
 					continue
 				}
 
 				side := "buy"
-				if msg.TransactionType == txnSell {
+				if eon.GetTransactionType() == rti.ExchangeOrderNotification_SELL {
 					side = "sell"
 				}
 
-				ts := rithmicTime(msg.Ssboe, msg.Usecs)
-				partial := msg.TotalUnfilledSize > 0
+				ts := rithmicTime(eon.GetSsboe(), eon.GetUsecs())
+				partial := eon.GetTotalUnfilledSize() > 0
 
 				handler(provider.Fill{
-					OrderID:   msg.BasketID,
-					Symbol:    msg.Symbol,
+					OrderID:   eon.GetBasketId(),
+					Symbol:    eon.GetSymbol(),
 					Side:      side,
-					Qty:       float64(msg.FillSize),
-					Price:     msg.FillPrice,
+					Qty:       float64(eon.GetFillSize()),
+					Price:     eon.GetFillPrice(),
 					Timestamp: ts,
 					Partial:   partial,
 				})
 
 			case tplRithmicOrderNotification:
-				// Log status changes for debugging
-				if msg.NotifyType == ronComplete {
+				ron, err := decodeRithmicOrderNotification(data)
+				if err != nil {
+					continue
+				}
+				if ron.GetNotifyType() == rti.RithmicOrderNotification_COMPLETE {
 					log.Printf("rithmic: order complete basket=%s reason=%s",
-						msg.BasketID, msg.CompletionReason)
+						ron.GetBasketId(), ron.GetCompletionReason())
 				}
 			}
 		}
@@ -1014,16 +1049,21 @@ func (p *Provider) ListSystems(ctx context.Context) ([]string, error) {
 	defer ws.Close(websocket.StatusNormalClosure, "done")
 
 	c := &conn{ws: ws}
-	resp, err := c.sendAndRecv(ctx, buildRequestSystemInfo(), tplResponseSystemInfo)
+	raw, err := c.sendAndRecvRaw(ctx, buildRequestSystemInfo(), tplResponseSystemInfo)
 	if err != nil {
 		return nil, fmt.Errorf("rithmic system info: %w", err)
 	}
 
-	if len(resp.RpCode) > 0 && resp.RpCode[0] != "0" {
+	resp, err := decodeResponseSystemInfo(raw)
+	if err != nil {
+		return nil, fmt.Errorf("rithmic decode system info: %w", err)
+	}
+
+	if !rpCodeOK(resp.RpCode) {
 		return nil, fmt.Errorf("rithmic system info failed: rp_code=%v", resp.RpCode)
 	}
 
-	return resp.SystemNames, nil
+	return resp.SystemName, nil
 }
 
 // TestPlantLogin attempts to log in to each Rithmic plant and reports which
