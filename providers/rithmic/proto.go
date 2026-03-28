@@ -398,9 +398,6 @@ func buildRequestLogin(user, password, appName, appVersion, systemName string, i
 	e.putString(fAppVersion, appVersion)
 	e.putString(fSystemName, systemName)
 	e.putInt32(fInfraType, infraType)
-	if infraType == infraTickerPlant {
-		e.putBool(fAggregatedQuotes, true)
-	}
 	return e.bytes()
 }
 

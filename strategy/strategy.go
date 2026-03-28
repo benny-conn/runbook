@@ -100,7 +100,7 @@ type Strategy interface {
 
 // TradeSubscriber is an optional interface a strategy can implement to receive
 // individual trade prints instead of (or in addition to) completed bars.
-// If the strategy implements this, the paper engine will also subscribe to
+// If the strategy implements this, the engine will also subscribe to
 // the trade stream for the requested symbols.
 type TradeSubscriber interface {
 	OnTrade(trade Trade) []Order

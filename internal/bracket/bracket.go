@@ -1,4 +1,4 @@
-// Package bracket provides TP/SL bracket simulation shared by the paper engine
+// Package bracket provides TP/SL bracket simulation shared by the live engine
 // (warmup) and the backtest engine.
 package bracket
 

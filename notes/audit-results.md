@@ -156,7 +156,7 @@ Architecture Assessment
 What's working well:
 
 - Clean provider abstraction (MarketData + Execution interfaces with optional capabilities)
-- Single-goroutine event loop in the paper engine eliminates most concurrency bugs
+- Single-goroutine event loop in the engine eliminates most concurrency bugs
 - JS strategy runtime is well-designed with good global injection
 - Portfolio tracking with futures multiplier support is solid and well-tested
 - Multi-timeframe aggregation is correct

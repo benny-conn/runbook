@@ -172,7 +172,7 @@ type pendingStop struct {
 }
 
 
-// Engine is the paper trading engine. It streams live data from the provider,
+// Engine is the live trading engine. It streams live data from the provider,
 // calls the strategy on each event, submits returned orders, and processes
 // async fill events — all serialized through a single event loop.
 type Engine struct {
@@ -235,7 +235,7 @@ type engineStats struct {
 	startTime      time.Time
 }
 
-// NewEngine constructs a paper trading engine. md and exec may be the same
+// NewEngine constructs a trading engine. md and exec may be the same
 // object (e.g. *alpaca.Provider) or separate implementations.
 func NewEngine(strat strategy.Strategy, md provider.MarketData, exec provider.Execution, store Store, cfg Config) *Engine {
 	_, clientStops := exec.(provider.ClientSideStops)
@@ -301,7 +301,7 @@ func (e *Engine) Snapshot() Snapshot {
 	return snap
 }
 
-// Run starts the paper trading engine. It blocks until ctx is cancelled.
+// Run starts the trading engine. It blocks until ctx is cancelled.
 func (e *Engine) Run(ctx context.Context, symbols []string) error {
 	e.ctx = ctx
 
@@ -313,19 +313,19 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		search = s
 	}
 	if search != nil {
-		e.logf("paper engine: provider supports asset search")
+		e.logf("engine: provider supports asset search")
 	}
 
 	var discovery strategy.MarketDiscovery
 	if md, ok := e.md.(strategy.MarketDiscovery); ok {
 		discovery = md
-		e.logf("paper engine: provider supports market discovery (legacy)")
+		e.logf("engine: provider supports market discovery (legacy)")
 	}
 
 	// If the strategy implements SymbolResolver, let it discover/choose symbols.
 	// This runs before recovery and OnInit — it determines what we trade.
 	if resolver, ok := e.strategy.(strategy.SymbolResolver); ok {
-		e.logf("paper engine: calling ResolveSymbols...")
+		e.logf("engine: calling ResolveSymbols...")
 		resolved, err := resolver.ResolveSymbols(strategy.InitContext{
 			Symbols:   symbols,
 			Timeframe: e.baseTimeframe,
@@ -337,7 +337,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 			return fmt.Errorf("strategy ResolveSymbols: %w", err)
 		}
 		symbols = mergeUnique(symbols, resolved)
-		e.logf("paper engine: resolved symbols: %v", symbols)
+		e.logf("engine: resolved symbols: %v", symbols)
 	}
 
 	if len(symbols) == 0 {
@@ -352,13 +352,13 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		for _, sym := range symbols {
 			spec, err := csp.GetContractSpec(ctx, sym)
 			if err != nil {
-				e.logf("paper engine: contract spec for %s: %v (defaulting to equity)", sym, err)
+				e.logf("engine: contract spec for %s: %v (defaulting to equity)", sym, err)
 				continue
 			}
 			e.contractSpecs[sym] = spec
 			if spec.PointValue > 1.0 {
 				multipliers[sym] = spec.PointValue
-				e.logf("paper engine: %s point_value=%.2f (tick_size=%.4f tick_value=%.4f)",
+				e.logf("engine: %s point_value=%.2f (tick_size=%.4f tick_value=%.4f)",
 					sym, spec.PointValue, spec.TickSize, spec.TickValue)
 			}
 		}
@@ -406,7 +406,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 			})
 			e.aggregators = append(e.aggregators, agg)
 		}
-		e.logf("paper engine: multi-timeframe active | base=%s higher=%v", sorted[0], sorted[1:])
+		e.logf("engine: multi-timeframe active | base=%s higher=%v", sorted[0], sorted[1:])
 	}
 
 	// Seed portfolio and warm up strategy indicators from account state + recent history.
@@ -430,7 +430,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 
 	// If the strategy implements Initializer, call OnInit before any market data.
 	if init, ok := e.strategy.(strategy.Initializer); ok {
-		e.logf("paper engine: calling OnInit...")
+		e.logf("engine: calling OnInit...")
 		if err := init.OnInit(strategy.InitContext{
 			Symbols:    symbols,
 			Timeframe:  e.baseTimeframe,
@@ -441,15 +441,15 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 		}); err != nil {
 			return fmt.Errorf("strategy OnInit: %w", err)
 		}
-		e.logf("paper engine: OnInit complete")
+		e.logf("engine: OnInit complete")
 	}
 
 	// If the strategy implements Shutdowner, call OnExit when the engine stops.
 	if sd, ok := e.strategy.(strategy.Shutdowner); ok {
 		defer func() {
-			e.logf("paper engine: calling OnExit...")
+			e.logf("engine: calling OnExit...")
 			sd.OnExit()
-			e.logf("paper engine: OnExit complete")
+			e.logf("engine: OnExit complete")
 		}()
 	}
 
@@ -469,7 +469,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 			case <-ctx.Done():
 			}
 		}); err != nil && ctx.Err() == nil {
-			e.logf("paper engine: fill subscription error: %v", err)
+			e.logf("engine: fill subscription error: %v", err)
 		}
 	}()
 
@@ -484,10 +484,10 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 					Size:      uint32(t.Size),
 				}})
 			}); err != nil && ctx.Err() == nil {
-				e.logf("paper engine: trade subscription error: %v", err)
+				e.logf("engine: trade subscription error: %v", err)
 			}
 		}()
-		e.logf("paper engine: trade-level subscription active for %v", symbols)
+		e.logf("engine: trade-level subscription active for %v", symbols)
 	}
 
 	// If the strategy implements QuoteSubscriber, subscribe to bid/ask quotes.
@@ -503,10 +503,10 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 					AskSize:   q.AskSize,
 				}})
 			}); err != nil && ctx.Err() == nil {
-				e.logf("paper engine: quote subscription error: %v", err)
+				e.logf("engine: quote subscription error: %v", err)
 			}
 		}()
-		e.logf("paper engine: quote-level subscription active for %v", symbols)
+		e.logf("engine: quote-level subscription active for %v", symbols)
 	}
 
 	// If the strategy implements DailySessionHandler, subscribe to market
@@ -515,7 +515,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 	// events if available, falling back to clock-based scheduling.
 	if _, ok := e.strategy.(strategy.DailySessionHandler); ok {
 		if _, continuous := e.md.(provider.ContinuousMarket); continuous {
-			e.logf("paper engine: provider is a continuous market — session hooks disabled")
+			e.logf("engine: provider is a continuous market — session hooks disabled")
 		} else if sn, ok := e.md.(provider.SessionNotifier); ok {
 			go func() {
 				if err := sn.SubscribeSession(ctx, func(ev provider.SessionEvent) {
@@ -526,17 +526,17 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 						e.send(ctx, marketCloseEvent{})
 					}
 				}); err != nil && ctx.Err() == nil {
-					e.logf("paper engine: session subscription error: %v", err)
+					e.logf("engine: session subscription error: %v", err)
 				}
 			}()
-			e.logf("paper engine: market session subscription active (provider-driven)")
+			e.logf("engine: market session subscription active (provider-driven)")
 		} else {
 			sched := e.config.MarketSchedule
 			if sched == nil {
 				sched = NYSESchedule()
 			}
 			go e.runSessionClock(ctx, sched)
-			e.logf("paper engine: market session subscription active (clock-based: open=%s close=%s tz=%s)",
+			e.logf("engine: market session subscription active (clock-based: open=%s close=%s tz=%s)",
 				sched.Open, sched.Close, sched.Timezone)
 		}
 	}
@@ -552,7 +552,7 @@ func (e *Engine) Run(ctx context.Context, symbols []string) error {
 
 	go e.processLoop(ctx)
 
-	e.logf("paper engine: connecting to bar stream | symbols=%v timeframe=%s", symbols, e.baseTimeframe)
+	e.logf("engine: connecting to bar stream | symbols=%v timeframe=%s", symbols, e.baseTimeframe)
 
 	// SubscribeBars blocks until ctx is cancelled — this is the main run loop.
 	return e.md.SubscribeBars(ctx, symbols, e.baseTimeframe, func(b provider.Bar) {
@@ -663,7 +663,7 @@ func (e *Engine) onQuote(quote strategy.Quote) {
 
 func (e *Engine) onMarketOpen() {
 	dsh := e.strategy.(strategy.DailySessionHandler) // safe: only called when strategy implements it
-	e.logf("paper engine: market open — calling OnMarketOpen")
+	e.logf("engine: market open — calling OnMarketOpen")
 	e.portfolio.ResetDaily()
 	e.strategy.SetPortfolio(e.portfolio)
 	e.submitOrders(dsh.OnMarketOpen())
@@ -671,7 +671,7 @@ func (e *Engine) onMarketOpen() {
 
 func (e *Engine) onMarketClose() {
 	dsh := e.strategy.(strategy.DailySessionHandler) // safe: only called when strategy implements it
-	e.logf("paper engine: market close — calling OnMarketClose")
+	e.logf("engine: market close — calling OnMarketClose")
 	e.strategy.SetPortfolio(e.portfolio)
 	e.submitOrders(dsh.OnMarketClose())
 
@@ -718,7 +718,7 @@ func (e *Engine) onFill(fill strategy.Fill) {
 func (e *Engine) runSessionClock(ctx context.Context, sched *MarketSchedule) {
 	loc, err := time.LoadLocation(sched.Timezone)
 	if err != nil {
-		e.logf("paper engine: invalid market timezone %q: %v — session clock disabled", sched.Timezone, err)
+		e.logf("engine: invalid market timezone %q: %v — session clock disabled", sched.Timezone, err)
 		return
 	}
 
@@ -747,7 +747,7 @@ func (e *Engine) runSessionClock(ctx context.Context, sched *MarketSchedule) {
 		}
 
 		delay := time.Until(nextTime)
-		e.logf("paper engine: next session event (%T) in %s at %s",
+		e.logf("engine: next session event (%T) in %s at %s",
 			ev, delay.Round(time.Second), nextTime.Format("2006-01-02 15:04:05 MST"))
 
 		select {
@@ -998,14 +998,14 @@ func joinStrings(ss []string, sep string) string {
 // launches independent subscription goroutines that feed events into the
 // existing event channel — no provider interface changes needed.
 func (e *Engine) addSymbols(symbols ...string) {
-	e.logf("paper engine: dynamically adding symbols %v", symbols)
+	e.logf("engine: dynamically adding symbols %v", symbols)
 
 	// Subscribe to bars for new symbols.
 	go func() {
 		if err := e.md.SubscribeBars(e.ctx, symbols, e.baseTimeframe, func(b provider.Bar) {
 			e.send(e.ctx, tickEvent{tick: provider.BarToTick(b)})
 		}); err != nil && e.ctx.Err() == nil {
-			e.logf("paper engine: dynamic bar subscription error for %v: %v", symbols, err)
+			e.logf("engine: dynamic bar subscription error for %v: %v", symbols, err)
 		}
 	}()
 
@@ -1020,7 +1020,7 @@ func (e *Engine) addSymbols(symbols ...string) {
 					Size:      uint32(t.Size),
 				}})
 			}); err != nil && e.ctx.Err() == nil {
-				e.logf("paper engine: dynamic trade subscription error for %v: %v", symbols, err)
+				e.logf("engine: dynamic trade subscription error for %v: %v", symbols, err)
 			}
 		}()
 	}
@@ -1038,7 +1038,7 @@ func (e *Engine) addSymbols(symbols ...string) {
 					AskSize:   q.AskSize,
 				}})
 			}); err != nil && e.ctx.Err() == nil {
-				e.logf("paper engine: dynamic quote subscription error for %v: %v", symbols, err)
+				e.logf("engine: dynamic quote subscription error for %v: %v", symbols, err)
 			}
 		}()
 	}

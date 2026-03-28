@@ -1,6 +1,6 @@
 # runbook
 
-A trading engine in Go that runs JavaScript strategies against live brokers or historical data. Design a strategy in JS, backtest it, then run it live on a paper account — same code, same engine.
+A trading engine in Go that runs JavaScript strategies against live brokers or historical data. Design a strategy in JS, backtest it, then run it live — same code, same engine.
 
 Supports **Alpaca** (stocks/ETFs), **TopStepX** (futures/prop trading), **Tradovate** (futures), **Interactive Brokers** (stocks/futures), **Coinbase** (crypto), and **Kalshi** (prediction markets).
 
@@ -17,8 +17,8 @@ go run ./cmd/backtest \
   --script scripts/mnq_scalp.js \
   --capital 50000
 
-# Run it live on a paper account
-go run ./cmd/paper \
+# Run it live
+go run ./cmd/live \
   --config configs/default.json \
   --provider topstepx \
   --symbols MNQ \
@@ -190,10 +190,10 @@ Results are saved to SQLite for review.
 
 ---
 
-## Running Paper Trading (Live)
+## Running Live
 
 ```bash
-go run ./cmd/paper \
+go run ./cmd/live \
   --config configs/default.json \
   --provider topstepx \
   --symbols MNQ \
@@ -223,7 +223,7 @@ Restarting mid-session is safe — the engine recovers from broker state.
 | Provider | Assets | Brackets | Notes |
 |----------|--------|----------|-------|
 | **TopStepX** | CME futures (ES, NQ, MES, MNQ, CL, GC...) | Native | Prop trading. 4:10 PM ET close. Min 4 tick bracket distance. |
-| **Alpaca** | US stocks/ETFs | Native | Paper trading free. IEX or SIP feeds. |
+| **Alpaca** | US stocks/ETFs | Native | Free tier available. IEX or SIP feeds. |
 | **Tradovate** | CME futures | OSO orders | Cloud API, no local gateway. |
 | **IBKR** | Stocks, futures | Not yet | Requires IB Gateway running locally. |
 | **Coinbase** | Crypto (BTC, ETH, SOL...) | Not yet | 24/7 markets. |
@@ -237,9 +237,9 @@ Restarting mid-session is safe — the engine recovers from broker state.
 runbook/
 ├── cmd/
 │   ├── backtest/          # CLI: run a backtest
-│   ├── paper/             # CLI: run live paper trading
+│   ├── live/              # CLI: run live trading
 │   └── topstepx-debug/    # CLI: inspect TopStepX account state
-├── engine/                # Paper trading engine (event loop, recovery, warmup)
+├── engine/                # Live trading engine (event loop, recovery, warmup)
 ├── backtest/              # Backtest engine (replay, bracket simulation)
 ├── strategy/              # Core interfaces (Strategy, Portfolio, Order, Fill)
 ├── strategies/script/     # JS runtime (goja VM, all globals, order parsing)
@@ -271,6 +271,6 @@ Results are logged to SQLite at `DATABASE_PATH` (default: `./trading_bot.db`).
 |-------|----------|
 | `backtest_runs` | Summary metrics for each backtest |
 | `backtest_fills` | Individual fills per run |
-| `paper_orders` | Orders submitted during live trading |
-| `paper_fills` | Fill confirmations from broker |
-| `paper_snapshots` | Portfolio snapshots after each fill |
+| `paper_orders` | Orders submitted during live trading (legacy table name) |
+| `paper_fills` | Fill confirmations from broker (legacy table name) |
+| `paper_snapshots` | Portfolio snapshots after each fill (legacy table name) |

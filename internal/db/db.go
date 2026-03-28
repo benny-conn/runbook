@@ -73,7 +73,7 @@ func (s *Store) migrate() error {
 			realized_pl REAL    NOT NULL
 		);
 
-		-- Paper trading tables (populated in step 7)
+		-- Live trading tables (populated in step 7)
 		CREATE TABLE IF NOT EXISTS paper_orders (
 			id             INTEGER PRIMARY KEY AUTOINCREMENT,
 			alpaca_order_id TEXT,

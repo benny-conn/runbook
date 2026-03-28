@@ -13,6 +13,7 @@ import (
 
 	"github.com/benny-conn/runbook/provider"
 	"github.com/benny-conn/runbook/strategy"
+	"github.com/coder/websocket"
 )
 
 const (
@@ -1001,6 +1002,53 @@ func aggregateBars(tickBars []provider.Bar, timeframe string) []provider.Bar {
 		})
 	}
 	return result
+}
+
+// ListSystems connects to the gateway and queries available system names.
+// This does not require authentication.
+func (p *Provider) ListSystems(ctx context.Context) ([]string, error) {
+	ws, _, err := websocket.Dial(ctx, p.cfg.URI, nil)
+	if err != nil {
+		return nil, fmt.Errorf("rithmic dial: %w", err)
+	}
+	defer ws.Close(websocket.StatusNormalClosure, "done")
+
+	c := &conn{ws: ws}
+	resp, err := c.sendAndRecv(ctx, buildRequestSystemInfo(), tplResponseSystemInfo)
+	if err != nil {
+		return nil, fmt.Errorf("rithmic system info: %w", err)
+	}
+
+	if len(resp.RpCode) > 0 && resp.RpCode[0] != "0" {
+		return nil, fmt.Errorf("rithmic system info failed: rp_code=%v", resp.RpCode)
+	}
+
+	return resp.SystemNames, nil
+}
+
+// TestPlantLogin attempts to log in to each Rithmic plant and reports which
+// ones succeed. Useful for diagnosing account permissions.
+func (p *Provider) TestPlantLogin(ctx context.Context) map[string]error {
+	plants := []struct {
+		name  string
+		infra int32
+	}{
+		{"TICKER_PLANT", infraTickerPlant},
+		{"ORDER_PLANT", infraOrderPlant},
+		{"HISTORY_PLANT", infraHistPlant},
+	}
+
+	results := make(map[string]error, len(plants))
+	for _, pl := range plants {
+		c, err := dial(ctx, p.cfg.URI, p.cfg.Username, p.cfg.Password, appName, appVersion, p.cfg.SystemName, pl.infra)
+		if err != nil {
+			results[pl.name] = err
+		} else {
+			results[pl.name] = nil
+			c.close()
+		}
+	}
+	return results
 }
 
 // Compile-time interface checks.
